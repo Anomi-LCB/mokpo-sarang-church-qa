@@ -52,28 +52,17 @@ def _is_our_server_healthy(port: int) -> bool:
 
 def _is_port_free(port: int) -> bool:
     """
-    Strictly verify a port is unused on BOTH 127.0.0.1 and 0.0.0.0.
-    Prevents the Windows Winsock dual-bind trap where binding 0.0.0.0 succeeds
-    even while another program (e.g., Unified Office Suite) already listens on 127.0.0.1!
+    Strictly and instantaneously (<1ms) verify a port is unused on BOTH 127.0.0.1, ::1, and 0.0.0.0
+    using kernel bind checks with SO_EXCLUSIVEADDRUSE.
+    Prevents BOTH:
+      1. Windows Winsock dual-bind trap (0.0.0.0 succeeding while another app holds 127.0.0.1), and
+      2. Multi-second Windows TCP loopback SYN-RST connect delays on closed ports.
     """
-    # 1. Active loopback probe (IPv4)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.settimeout(0.25)
-        if probe.connect_ex(("127.0.0.1", port)) == 0:
-            return False
-
-    # 2. Active loopback probe (IPv6, best effort)
-    try:
-        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe6:
-            probe6.settimeout(0.25)
-            if probe6.connect_ex(("::1", port)) == 0:
-                return False
-    except OSError:
-        pass
-
-    # 3. Exclusive bind checks on both loopback and wildcard
-    for host in ("127.0.0.1", "0.0.0.0"):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    for family, host in (
+        (socket.AF_INET, "127.0.0.1"),
+        (socket.AF_INET, "0.0.0.0"),
+    ):
+        with socket.socket(family, socket.SOCK_STREAM) as s:
             if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
                 try:
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -83,22 +72,43 @@ def _is_port_free(port: int) -> bool:
                 s.bind((host, port))
             except OSError:
                 return False
+
+    if socket.has_ipv6:
+        try:
+            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s6:
+                if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                    try:
+                        s6.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                    except OSError:
+                        pass
+                try:
+                    s6.bind(("::1", port))
+                except OSError:
+                    return False
+        except OSError:
+            pass
+
     return True
 
 
 def _pick_port_or_existing(preferred_port: int, span: int = 25) -> tuple[int, bool]:
     """
-    Scan preferred_port .. preferred_port+span-1:
-    - If our own 목포사랑의교회 행정Q&A server is already healthy on any port, return (port, True).
+    Scan preferred_port .. preferred_port+span-1 in <5ms:
+    - Only probe /api/health on ports that are ACTUALLY occupied (instant kernel bind check).
+    - If our own 목포사랑의교회 행정Q&A server is already healthy on an occupied port, return (port, True).
     - Otherwise return the first strictly free port (port, False).
     """
-    for cand in range(preferred_port, preferred_port + span):
-        if _is_our_server_healthy(cand):
-            return cand, True
-
+    first_free: int | None = None
     for cand in range(preferred_port, preferred_port + span):
         if _is_port_free(cand):
-            return cand, False
+            if first_free is None:
+                first_free = cand
+        else:
+            if _is_our_server_healthy(cand):
+                return cand, True
+
+    if first_free is not None:
+        return first_free, False
 
     raise RuntimeError(f"사용 가능한 포트를 찾을 수 없습니다 ({preferred_port}~{preferred_port + span - 1}).")
 

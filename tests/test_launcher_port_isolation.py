@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -51,11 +52,14 @@ def test_launcher_rejects_foreign_app_on_loopback_and_picks_free_port() -> None:
         assert _is_our_server_healthy(foreign_port) is False
         # Must detect foreign loopback listener as NOT free (no Windows 0.0.0.0 dual-bind trap!)
         assert _is_port_free(foreign_port) is False
-        # Must skip foreign_port and choose a truly free port
+        # Must skip foreign_port and choose a truly free port instantaneously (< 1.0s)
+        t0 = time.perf_counter()
         chosen, already_running = _pick_port_or_existing(foreign_port, span=10)
+        elapsed = time.perf_counter() - t0
         assert already_running is False
         assert chosen != foreign_port
         assert _is_port_free(chosen) is True
+        assert elapsed < 1.0, f"Port scan too slow: {elapsed:.2f}s"
     finally:
         srv.shutdown()
         srv.server_close()
