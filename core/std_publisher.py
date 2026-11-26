@@ -22,6 +22,7 @@ import pymupdf
 from core.config import DEFAULT_NOTEBOOK_ID
 from core.database import Database
 from core.retriever import retrieve
+from core.std_config import DEFAULT_PDF_TEMPLATE, load_std_config, resolve_approval_preset
 from core.std_store import StandardizationStore, get_std_publications_dir
 from server.cli_providers import load_ai_config, stream_cli_with_failover
 
@@ -45,6 +46,20 @@ def _esc(val: Any) -> str:
     return html.escape(str(val or ""), quote=True)
 
 
+def _build_approval_table_html(slots: list[str], compact: bool = False) -> str:
+    safe_slots = [s for s in (slots or ["총무", "부장", "지도교역자", "당회장"]) if str(s).strip()]
+    ths = "".join(f"<th>{_esc(s)}</th>" for s in safe_slots)
+    h_px = "34px" if compact else "42px"
+    tds = "".join(f'<td style="height:{h_px};"></td>' for _ in safe_slots)
+    cls = "approval-box" if compact else "approval-box cover-approval-box"
+    return (
+        f'<table class="{cls}">'
+        f'<tr><th rowspan="2" class="approval-label">결<br/>재</th>{ths}</tr>'
+        f"<tr>{tds}</tr>"
+        f"</table>"
+    )
+
+
 def _render_publication_html(
     board: dict[str, Any],
     manuscript: dict[str, Any],
@@ -52,7 +67,29 @@ def _render_publication_html(
     vote_summary: list[dict[str, Any]],
     version_label: str,
     created_by: str,
+    pdf_template: dict[str, Any] | None = None,
+    approval_preset: dict[str, Any] | None = None,
 ) -> str:
+    tpl = {**DEFAULT_PDF_TEMPLATE, **(pdf_template or {})}
+    ap_preset = approval_preset or {
+        "name": "부서 기본 결재선 (위임전결규정 별표)",
+        "slots": ["총무", "부장", "지도교역자", "당회장"],
+        "basis": "시행세칙 제11장 위임전결규정 제124조·제127조 [별표]",
+    }
+    approval_slots: list[str] = list(ap_preset.get("slots") or ["총무", "부장", "지도교역자", "당회장"])
+    approval_chain_text = " → ".join(approval_slots)
+    accent = str(tpl.get("accent_color") or "#0f4c81")
+    church_name = str(tpl.get("church_name") or "목포사랑의교회")
+    denom_header = str(tpl.get("denomination_header") or "대한예수교장로회 · 목포사랑의교회 공식 행정 표준 규정집")
+    committee_label = str(tpl.get("committee_label") or "행정표준화위원회")
+    footer_left = str(tpl.get("footer_left") or f"{church_name} {committee_label}")
+    footer_right = str(tpl.get("footer_right") or "공식 정규 행정 문서 (위임전결규정 준용)")
+    default_recipient = str(tpl.get("default_recipient") or f"{church_name} 당회장 귀하")
+    default_stmt = str(tpl.get("default_submit_statement") or "위와 같이 제출(신청)하오니 허락하여 주시기 바랍니다.")
+    show_cover_approval = bool(tpl.get("show_cover_approval_box", True))
+    show_deleg_note = bool(tpl.get("show_delegation_footnote", True))
+    deleg_note = str(tpl.get("delegation_footnote") or "")
+
     today_str = datetime.now().strftime("%Y년 %m월 %d일")
     doc_title = manuscript.get("title") or board["title"]
     subtitle = manuscript.get("subtitle") or f"{board['category']} · {board['work_type']}"
@@ -148,7 +185,9 @@ def _render_publication_html(
             f"</section>"
         )
 
-    # Build Standard Forms HTML (each crisp printable A4 form box)
+    # Build Standard Forms HTML (each crisp printable A4 form box with church approval line)
+    form_approval_html = _build_approval_table_html(approval_slots, compact=True)
+    deleg_html = f'<p class="deleg-note">{_esc(deleg_note)}</p>' if (show_deleg_note and deleg_note) else ""
     forms_html: list[str] = []
     for f_idx, fm in enumerate(std_forms, start=1):
         f_title = fm.get("title") or f"표준 서식 제{f_idx}호"
@@ -161,17 +200,17 @@ def _render_publication_html(
         forms_html.append(
             f'<div class="form-sheet">'
             f'<div class="form-top">'
-            f'  <div><div class="form-code">표준 서식 제{f_idx}호</div><h3>{_esc(f_title)}</h3>'
+            f'  <div class="form-head-left"><div class="form-code">표준 서식 제{f_idx}호</div><h3>{_esc(f_title)}</h3>'
             f'  {f"<p class=form-purpose>{_esc(f_purpose)}</p>" if f_purpose else ""}</div>'
-            f'  <table class="approval-box"><tr><th>담당</th><th>부서장</th><th>당회장</th></tr>'
-            f'  <tr><td style="height:36px;"></td><td></td><td></td></tr></table>'
+            f'  {form_approval_html}'
             f"</div>"
             f'<table class="form-grid"><tbody>{f_rows}</tbody></table>'
+            f"{deleg_html}"
             f'<div class="form-footer">'
-            f'  <p class="form-stmt">위와 같이 제출(신청)하오니 허락하여 주시기 바랍니다.</p>'
+            f'  <p class="form-stmt">{_esc(default_stmt)}</p>'
             f'  <p class="form-date">20    년      월      일</p>'
             f'  <p class="form-sign">신청인(작성자): ____________________ (인)</p>'
-            f'  <p class="form-recipient">목포사랑의교회 당회장 귀하</p>'
+            f'  <p class="form-recipient">{_esc(default_recipient)}</p>'
             f"</div>"
             f"</div>"
         )
@@ -237,7 +276,7 @@ def _render_publication_html(
     justify-content: space-between;
     page-break-after: always;
     background: linear-gradient(180deg, #fafaf9 0%, #ffffff 38%, #ffffff 100%);
-    border-left: 7mm solid #0f4c81;
+    border-left: 7mm solid {accent};
   }}
   .cover-top {{
     display: flex;
@@ -259,10 +298,10 @@ def _render_publication_html(
   }}
   .cover-main {{
     margin: auto 0;
-    padding: 16mm 0;
+    padding: 12mm 0;
   }}
   .cover-kicker {{
-    color: #0f4c81;
+    color: {accent};
     font-size: 10.5pt;
     font-weight: 700;
     letter-spacing: 0.1em;
@@ -279,15 +318,24 @@ def _render_publication_html(
   .cover-sub {{
     font-size: 12.5pt;
     color: #52525b;
-    margin: 0 0 22px 0;
+    margin: 0 0 20px 0;
   }}
   .cover-summary {{
-    border-left: 3px solid #0f4c81;
+    border-left: 3px solid {accent};
     background: #f7f7f5;
     padding: 14px 18px;
     font-size: 10.2pt;
     color: #3f3f46;
     line-height: 1.72;
+  }}
+  .cover-approval-wrap {{
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 18px;
+  }}
+  .cover-approval-box th, .cover-approval-box td {{
+    min-width: 56px;
+    padding: 4px 10px;
   }}
   .cover-meta {{
     width: 100%;
@@ -437,12 +485,15 @@ def _render_publication_html(
     padding-bottom: 10px;
     margin-bottom: 14px;
   }}
-  .form-code {{ font-size: 8.5pt; font-weight: 700; color: #0f4c81; }}
-  .form-top h3 {{ margin: 2px 0 4px 0; font-size: 15pt; font-weight: 800; letter-spacing: 0.04em; }}
+  .form-head-left {{ flex: 1; min-width: 0; }}
+  .form-code {{ font-size: 8.5pt; font-weight: 700; color: {accent}; }}
+  .form-top h3 {{ margin: 2px 0 4px 0; font-size: 14.5pt; font-weight: 800; letter-spacing: 0.04em; }}
   .form-purpose {{ margin: 0; font-size: 8.8pt; color: #52525b; }}
-  .approval-box {{ border-collapse: collapse; font-size: 8.5pt; min-width: 148px; }}
-  .approval-box th, .approval-box td {{ border: 1px solid #3f3f46; text-align: center; padding: 3px 8px; }}
+  .approval-box {{ border-collapse: collapse; font-size: 8.2pt; flex-shrink: 0; }}
+  .approval-box th, .approval-box td {{ border: 1px solid #3f3f46; text-align: center; padding: 3px 7px; min-width: 44px; }}
   .approval-box th {{ background: #f4f4f2; font-weight: 600; }}
+  .approval-box th.approval-label {{ width: 22px; min-width: 22px; background: #ecece9; line-height: 1.35; font-weight: 700; padding: 3px 4px; }}
+  .deleg-note {{ margin: 7px 0 0 0; font-size: 8pt; color: #52525b; line-height: 1.45; }}
   .form-grid {{ width: 100%; border-collapse: collapse; font-size: 9.5pt; }}
   .form-grid th {{
     background: #f7f7f5; border: 1px solid #3f3f46; padding: 7px 10px; text-align: left; font-weight: 600;
@@ -466,7 +517,7 @@ def _render_publication_html(
   <!-- COVER PAGE -->
   <div class="cover">
     <div class="cover-top">
-      <span>대한예수교장로회 · 목포사랑의교회 공식 행정 표준 규정집</span>
+      <span>{_esc(denom_header)}</span>
       <span class="cover-ver">{_esc(version_label)}</span>
     </div>
     <div class="cover-main">
@@ -474,22 +525,25 @@ def _render_publication_html(
       <h1 class="cover-title">{_esc(doc_title)}</h1>
       <p class="cover-sub">{_esc(subtitle)}</p>
       {f'<div class="cover-summary">{_esc(exec_summary)}</div>' if exec_summary else ''}
+      {f'<div class="cover-approval-wrap">{_build_approval_table_html(approval_slots, compact=False)}</div>' if show_cover_approval else ''}
       <table class="cover-meta">
         <tr><th>시행 · 편찬일</th><td>{_esc(today_str)}</td><th>판본</th><td>{_esc(version_label)}</td></tr>
-        <tr><th>적용 분류</th><td>{_esc(board['category'])}</td><th>편찬 주관</th><td>{_esc(created_by)} (행정표준화위원회)</td></tr>
+        <tr><th>적용 부서·분류</th><td>{_esc(board['category'])}</td><th>편찬 주관</th><td>{_esc(created_by)} ({_esc(committee_label)})</td></tr>
+        <tr><th>적용 결재선</th><td colspan="3">{_esc(approval_chain_text)} ({_esc(ap_preset.get('basis') or ap_preset.get('name', ''))})</td></tr>
         <tr><th>반영 범위</th><td colspan="3">교역자 제출 행정자료 · 투표 채택안 {len(vote_summary)}건 · 상위 법규(총회헌법·정관·시행세칙) 위계 검수 완료</td></tr>
       </table>
+      {f'<p class="deleg-note" style="margin-top:8px;">{_esc(deleg_note)}</p>' if (show_deleg_note and deleg_note) else ''}
     </div>
     <div class="cover-bottom">
-      <span>목포사랑의교회 행정Q&amp;A 표준화 편찬 시스템</span>
-      <span>공식 정규 행정 문서</span>
+      <span>{_esc(footer_left)}</span>
+      <span>{_esc(footer_right)}</span>
     </div>
   </div>
 
   <!-- TOC & LAW AUDIT -->
   <div>
     <div class="running-bar">
-      <span>목포사랑의교회 행정Q&amp;A · {_esc(doc_title)}</span>
+      <span>{_esc(church_name)} 행정Q&amp;A · {_esc(doc_title)}</span>
       <span>{_esc(version_label)} · {_esc(today_str)}</span>
     </div>
     <h2 class="section-h">목 차 (Table of Contents)</h2>
@@ -505,7 +559,7 @@ def _render_publication_html(
   <!-- MAIN CHAPTERS -->
   <div class="page-break">
     <div class="running-bar">
-      <span>목포사랑의교회 공식 행정 표준 규정</span>
+      <span>{_esc(church_name)} 공식 행정 표준 규정</span>
       <span>{_esc(doc_title)}</span>
     </div>
     {"".join(chapters_html)}
@@ -598,7 +652,17 @@ def _render_manuscript_docx(
     vote_summary: list[dict[str, Any]],
     version_label: str,
     out_docx: Path,
+    pdf_template: dict[str, Any] | None = None,
+    approval_preset: dict[str, Any] | None = None,
 ) -> Path:
+    tpl = {**DEFAULT_PDF_TEMPLATE, **(pdf_template or {})}
+    ap_slots = list((approval_preset or {}).get("slots") or ["총무", "부장", "지도교역자", "당회장"])
+    denom_header = str(tpl.get("denomination_header") or "대한예수교장로회 · 목포사랑의교회 공식 행정 표준 규정집")
+    default_stmt = str(tpl.get("default_submit_statement") or "위와 같이 제출(신청)하오니 허락하여 주시기 바랍니다.")
+    default_recipient = str(tpl.get("default_recipient") or "목포사랑의교회 당회장 귀하")
+    deleg_note = str(tpl.get("delegation_footnote") or "")
+    show_deleg_note = bool(tpl.get("show_delegation_footnote", True))
+
     d = docx.Document()
     for sec in d.sections:
         sec.top_margin = Cm(2.0)
@@ -613,7 +677,7 @@ def _render_manuscript_docx(
     # Title
     p_k = d.add_paragraph()
     p_k.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    rk = p_k.add_run(f"목포사랑의교회 공식 행정 표준 규정집 ({version_label})")
+    rk = p_k.add_run(f"{denom_header} ({version_label})")
     rk.font.name = "맑은 고딕"
     rk.font.size = Pt(10)
     rk.font.color.rgb = RGBColor(15, 76, 129)
@@ -624,6 +688,13 @@ def _render_manuscript_docx(
     rt.font.name = "맑은 고딕"
     rt.font.size = Pt(18)
     rt.bold = True
+
+    p_ap = d.add_paragraph()
+    p_ap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    rap = p_ap.add_run(f"적용 결재선: {' → '.join(ap_slots)}")
+    rap.font.name = "맑은 고딕"
+    rap.font.size = Pt(9.5)
+    rap.font.color.rgb = RGBColor(82, 82, 91)
 
     if manuscript.get("executive_summary"):
         p_s = d.add_paragraph(manuscript["executive_summary"])
@@ -650,12 +721,33 @@ def _render_manuscript_docx(
                 ptip = d.add_paragraph(f"  [실무 가이드] {art['practical_tip']}")
                 ptip.paragraph_format.space_after = Pt(4)
 
-    # Standard Forms
+    # Standard Forms with Real Church Approval Line Box
     for f_idx, fm in enumerate(manuscript.get("standard_forms") or [], start=1):
         d.add_page_break()
         fh = d.add_heading(f"표준 서식 제{f_idx}호: {fm.get('title', '')}", level=1)
         for r in fh.runs:
             r.font.name = "맑은 고딕"
+
+        # Approval line table
+        ap_tbl = d.add_table(rows=2, cols=len(ap_slots) + 1)
+        ap_tbl.alignment = WD_TABLE_ALIGNMENT.RIGHT
+        lbl_cell = ap_tbl.cell(0, 0).merge(ap_tbl.cell(1, 0))
+        lbl_cell.text = "결재"
+        lbl_cell.width = Cm(1.1)
+        lbl_cell._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="ECECE9"/>'))
+        _set_cell_border(lbl_cell)
+        for ci, slot in enumerate(ap_slots, start=1):
+            c_top = ap_tbl.cell(0, ci)
+            c_bot = ap_tbl.cell(1, ci)
+            c_top.text = str(slot)
+            c_bot.text = "\n"
+            c_top.width = Cm(2.1)
+            c_bot.width = Cm(2.1)
+            c_top._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="F4F4F2"/>'))
+            _set_cell_border(c_top)
+            _set_cell_border(c_bot)
+        d.add_paragraph("")
+
         fields = fm.get("fields") or ["성명", "직분", "소속", "연락처", "내용"]
         tbl = d.add_table(rows=len(fields), cols=2)
         tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -670,12 +762,17 @@ def _render_manuscript_docx(
             _set_cell_border(c0)
             _set_cell_border(c1)
 
-        d.add_paragraph("\n위와 같이 신청(제출)하오니 허락하여 주시기 바랍니다.").alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if show_deleg_note and deleg_note:
+            p_dn = d.add_paragraph(deleg_note)
+            p_dn.runs[0].font.size = Pt(8.5)
+            p_dn.runs[0].font.color.rgb = RGBColor(82, 82, 91)
+
+        d.add_paragraph(f"\n{default_stmt}").alignment = WD_ALIGN_PARAGRAPH.CENTER
         d.add_paragraph("20    년      월      일").alignment = WD_ALIGN_PARAGRAPH.CENTER
         d.add_paragraph("신청인(작성자):                  (인)").alignment = WD_ALIGN_PARAGRAPH.RIGHT
         pr = d.add_paragraph()
         pr.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        rr = pr.add_run("목포사랑의교회 당회장 귀하")
+        rr = pr.add_run(default_recipient)
         rr.bold = True
         rr.font.size = Pt(12)
 
@@ -836,6 +933,8 @@ async def stream_committee_compile(
     version_label: str = "",
     custom_directives: str = "",
     created_by: str = "관리자",
+    approval_preset_id: str = "",
+    custom_approval_slots: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     4-Role Expert Committee AI Compilation Pipeline:
@@ -844,6 +943,17 @@ async def stream_committee_compile(
       Stage 3: Administrative Forms & Checklist Designer
       Stage 4: Chief Editor Polish + Vector A4 HTML->PDF & DOCX Typesetting
     """
+    std_cfg = load_std_config(db)
+    pdf_template = std_cfg.get("pdf_template") or DEFAULT_PDF_TEMPLATE
+    approval_preset = resolve_approval_preset(
+        std_cfg,
+        board_category=board.get("category", ""),
+        preset_id=approval_preset_id,
+        custom_slots=custom_approval_slots,
+    )
+    approval_slots = list(approval_preset.get("slots") or ["총무", "부장", "지도교역자", "당회장"])
+    approval_chain_str = " → ".join(approval_slots)
+
     submissions = store.list_submissions(board["id"], include_archived=False)
     proposals = store.list_proposals(board["id"])
     comments = store.list_comments(board["id"])
@@ -933,7 +1043,8 @@ async def stream_committee_compile(
 제목: {board['title']}
 분류: {board['category']} | 작업형태: {board['work_type']}
 목적·안내: {board['description']}
-관리자 추가 편찬 지침: {custom_directives or '표준 법규 문체, 명확한 결재선, 실무 체크리스트 및 표준 서식 포함'}
+적용 교회 결재선: {approval_chain_str} ({approval_preset.get('basis') or approval_preset.get('name', '')})
+관리자 추가 편찬 지침: {custom_directives or f'표준 법규 문체, 교회 공식 결재선({approval_chain_str}), 실무 체크리스트 및 표준 서식 포함'}
 
 [투표로 채택된 표준 규격]
 {votes_text or '(투표 안건 없음 — 제출 자료 전체를 최적 통합)'}
@@ -1027,6 +1138,8 @@ async def stream_committee_compile(
         vote_summary=vote_summary,
         version_label=version_label,
         created_by=created_by,
+        pdf_template=pdf_template,
+        approval_preset=approval_preset,
     )
 
     pub_dir = get_std_publications_dir(board["id"])
@@ -1036,11 +1149,23 @@ async def stream_committee_compile(
     docx_path = pub_dir / f"{safe_title}_{version_label}_{stamp}.docx"
 
     pdf_engine = await asyncio.to_thread(_render_html_to_pdf, pub_html, pdf_path)
-    await asyncio.to_thread(_render_manuscript_docx, board, manuscript, law_audit, vote_summary, version_label, docx_path)
+    await asyncio.to_thread(
+        _render_manuscript_docx,
+        board,
+        manuscript,
+        law_audit,
+        vote_summary,
+        version_label,
+        docx_path,
+        pdf_template,
+        approval_preset,
+    )
 
     committee_report = {
         "ai_engine": used_engine,
         "pdf_engine": pdf_engine,
+        "approval_preset_name": approval_preset.get("name", ""),
+        "approval_slots": approval_slots,
         "submission_count": len(submissions),
         "proposal_count": len(proposals),
         "comment_count": len(comments),

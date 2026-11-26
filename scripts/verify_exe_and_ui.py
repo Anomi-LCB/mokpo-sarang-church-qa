@@ -332,6 +332,17 @@ def main() -> None:
             dpage.wait_for_timeout(200)
             audit_geometry(dpage, "Desktop-1440x900-StdCreateModal")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_modal.png"))
+            dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
+            dpage.wait_for_timeout(150)
+
+            # Open Church Taxonomy & Approval Line Customization Modal in Standardization Studio
+            dpage.click('aside button[aria-label="표준화실 규격 및 결재선 설정"]')
+            dpage.wait_for_selector("text=목포사랑의교회 표준화실 규격", timeout=5000)
+            dpage.click('div.fixed.inset-0.z-50 button:has-text("교회 결재선 양식")')
+            dpage.wait_for_selector("text=부서 기본 결재선", timeout=5000)
+            dpage.wait_for_timeout(200)
+            audit_geometry(dpage, "Desktop-1440x900-StdConfigApprovals")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_config.png"))
             d_ctx.close()
 
             browser.close()

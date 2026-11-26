@@ -21,7 +21,9 @@ import {
   RotateCcw,
   Send,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
+  Stamp,
   Trash2,
   Upload,
   Vote,
@@ -33,10 +35,12 @@ import type {
   StdBoard,
   StdBoardDetail,
   StdBoardStatus,
+  StdConfig,
   StdCrossMemory,
   StdPublication,
 } from '../types';
 import { MarkdownView } from './MarkdownView';
+import { StdConfigModal } from './StdConfigModal';
 
 interface Props {
   isAdmin: boolean;
@@ -46,18 +50,28 @@ interface Props {
   onQaDocumentsUpdated: () => void;
 }
 
-const CATEGORY_PRESETS = [
-  '예배·의전',
-  '재정·회계',
-  '교육·다음세대',
-  '인사·복무',
-  '셀·교구·심방',
-  '차량·시설·안전',
-  '선교·봉사·구제',
-  '당회·제직회·치리',
+const DEFAULT_CATEGORY_NAMES = [
+  '예배선교부',
+  '교육선교부',
+  '목양사역선교부',
+  '장학선교부',
+  '세계선교부',
+  '사회봉사부',
+  '재단관리부',
+  '차량관리부',
+  '주방관리부',
+  '재정부',
+  '당회·제직회·공동의회',
+  '교역자·유급직원·인사',
 ];
 
-const WORK_TYPE_PRESETS = ['규정·서식 표준화', '매뉴얼 신설', '기존 세칙 개정', '공문 양식 통일'];
+const DEFAULT_WORK_TYPE_NAMES = [
+  '규정·서식 표준화',
+  '시행세칙 개정안',
+  '부서 업무 매뉴얼',
+  '결재·공문 양식 통일',
+  '위임전결·절차 점검표',
+];
 
 const STATUS_META: Record<StdBoardStatus, { label: string; dot: string; pill: string }> = {
   collecting: { label: '수집 중', dot: 'bg-[#0f4c81]', pill: 'bg-[#0f4c81]/10 text-[#0f4c81]' },
@@ -85,10 +99,16 @@ export const StandardizationWorkspace: React.FC<Props> = ({
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
 
+  // Church Taxonomy / Approval Line / PDF Cover Configuration
+  const [stdConfig, setStdConfig] = useState<StdConfig | null>(null);
+  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [compileApprovalPresetId, setCompileApprovalPresetId] = useState('');
+  const [compileCustomSlots, setCompileCustomSlots] = useState('');
+
   // Create Board Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
-  const [newCat, setNewCat] = useState('재정·회계');
+  const [newCat, setNewCat] = useState('재정부');
   const [newWorkType, setNewWorkType] = useState('규정·서식 표준화');
   const [newDesc, setNewDesc] = useState('');
   const [newGuide, setNewGuide] = useState('');
@@ -135,7 +155,14 @@ export const StandardizationWorkspace: React.FC<Props> = ({
   const loadBoards = useCallback(async (selectId?: string) => {
     setLoading(true);
     try {
-      const [list, mems] = await Promise.all([api.stdListBoards(), api.stdListCrossMemories('', 'pending')]);
+      const [list, mems, cfg] = await Promise.all([
+        api.stdListBoards(),
+        api.stdListCrossMemories('', 'pending'),
+        api.stdGetConfig().catch(() => null),
+      ]);
+      if (cfg) {
+        setStdConfig(cfg);
+      }
       setBoards(list);
       setGlobalMemories(mems);
       const target =
@@ -400,6 +427,13 @@ export const StandardizationWorkspace: React.FC<Props> = ({
     setCompileStages([]);
     setError('');
     try {
+      const customSlotsArr =
+        compileApprovalPresetId === '__custom__'
+          ? compileCustomSlots
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : undefined;
       const res = await fetch(`/api/std/boards/${encodeURIComponent(activeBoardId)}/compile/stream`, {
         method: 'POST',
         credentials: 'include',
@@ -407,6 +441,9 @@ export const StandardizationWorkspace: React.FC<Props> = ({
         body: JSON.stringify({
           version_label: compileVersion.trim(),
           custom_directives: compileDirectives.trim(),
+          approval_preset_id:
+            compileApprovalPresetId && compileApprovalPresetId !== '__custom__' ? compileApprovalPresetId : '',
+          custom_approval_slots: customSlotsArr,
         }),
       });
       if (!res.ok || !res.body) throw new Error(`편찬 요청 오류 (${res.status})`);
@@ -485,14 +522,25 @@ export const StandardizationWorkspace: React.FC<Props> = ({
             <span className="text-xs font-semibold text-[#18181b]">행정 표준화 과제</span>
           </div>
           {isAdmin && (
-            <button
-              type="button"
-              onClick={() => setShowCreateModal(true)}
-              className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#18181b] px-2 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
-            >
-              <Plus className="h-3 w-3" />
-              <span>새 모집</span>
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setShowConfigModal(true)}
+                title="분류·부서 체계 및 교회 결재선·PDF 표지 설정"
+                aria-label="표준화실 규격 및 결재선 설정"
+                className="rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.06] hover:text-[#18181b]"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCreateModal(true)}
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#18181b] px-2 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
+              >
+                <Plus className="h-3 w-3" />
+                <span>새 모집</span>
+              </button>
+            </div>
           )}
         </div>
 
@@ -1374,11 +1422,21 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                   <div className="space-y-4">
                     {isAdmin && (
                       <div className="rounded-xl border border-black/[0.08] bg-[#fafaf9] p-4 space-y-3">
-                        <div className="flex items-center gap-2">
-                          <Layers className="h-4 w-4 text-[#0f4c81]" />
-                          <h3 className="text-xs font-semibold text-[#18181b]">
-                            4역할 전문가 위원회 정규 PDF · Word 편찬 스튜디오
-                          </h3>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <Layers className="h-4 w-4 text-[#0f4c81]" />
+                            <h3 className="text-xs font-semibold text-[#18181b]">
+                              4역할 전문가 위원회 정규 PDF · Word 편찬 스튜디오
+                            </h3>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowConfigModal(true)}
+                            className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#18181b] hover:bg-[#f7f7f5]"
+                          >
+                            <Stamp className="h-3 w-3 text-[#0f4c81]" />
+                            <span>표지 · 결재선 맞춤 설정</span>
+                          </button>
                         </div>
                         <p className="text-[11.5px] leading-relaxed text-[#52525b]">
                           ① 체계·목차 설계 → ② 총회헌법·정관·시행세칙 상위 법규 위계 검수 → ③ 표준 서식·체크리스트 편집 → ④ 출판급 A4 PDF + Word(.docx) 동시 조판
@@ -1391,14 +1449,36 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                             placeholder="판본명 (비우면 자동 v1.0, v1.1...)"
                             className="rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs"
                           />
+                          <select
+                            value={compileApprovalPresetId}
+                            onChange={(e) => setCompileApprovalPresetId(e.target.value)}
+                            className="rounded-lg border border-black/[0.1] bg-white px-2.5 py-2 text-xs"
+                          >
+                            <option value="">결재선: 부서 기본 자동 매칭</option>
+                            {(stdConfig?.approval_presets || []).map((ap) => (
+                              <option key={ap.id} value={ap.id}>
+                                {ap.name} ({ap.slots.join('→')})
+                              </option>
+                            ))}
+                            <option value="__custom__">직접 결재선 입력...</option>
+                          </select>
                           <input
                             type="text"
                             value={compileDirectives}
                             onChange={(e) => setCompileDirectives(e.target.value)}
-                            placeholder="추가 편찬 지침 (예: 당회 보고용 표지, 부록에 표준 청원서 2종 포함)"
-                            className="rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs sm:col-span-2"
+                            placeholder="추가 편찬 지침 (선택)"
+                            className="rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs"
                           />
                         </div>
+                        {compileApprovalPresetId === '__custom__' && (
+                          <input
+                            type="text"
+                            value={compileCustomSlots}
+                            onChange={(e) => setCompileCustomSlots(e.target.value)}
+                            placeholder="결재 칸을 쉼표로 입력 (예: 총무, 부장, 지도교역자, 당회장)"
+                            className="w-full rounded-lg border border-[#0f4c81]/35 bg-white px-3 py-2 text-xs"
+                          />
+                        )}
                         <button
                           type="button"
                           disabled={compiling}
@@ -1450,6 +1530,9 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                 </div>
                                 <p className="mt-1 text-[11px] text-[#8a8a8e]">
                                   편찬일: {pub.created_at.slice(0, 16).replace('T', ' ')} · {pub.committee_report.chapter_count || 0}개 장 · 표준 서식 {pub.committee_report.form_count || 0}종 · PDF {Math.round((pub.committee_report.pdf_bytes || 0) / 1024)} KB
+                                  {pub.committee_report.approval_slots?.length
+                                    ? ` · 결재선: ${pub.committee_report.approval_slots.join('→')}`
+                                    : ''}
                                 </p>
                               </div>
 
@@ -1591,9 +1674,21 @@ export const StandardizationWorkspace: React.FC<Props> = ({
               </div>
 
               <div>
-                <label className="mb-1 block text-[11.5px] font-semibold text-[#52525b]">행정 분류</label>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <label className="text-[11.5px] font-semibold text-[#52525b]">교회 부서 · 행정 분류</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCreateModal(false);
+                      setShowConfigModal(true);
+                    }}
+                    className="text-[10.5px] font-medium text-[#0f4c81] hover:underline"
+                  >
+                    분류·결재선 편집
+                  </button>
+                </div>
                 <div className="mb-1.5 flex flex-wrap gap-1">
-                  {CATEGORY_PRESETS.map((c) => (
+                  {(stdConfig?.categories.map((c) => c.name) || DEFAULT_CATEGORY_NAMES).map((c) => (
                     <button
                       key={c}
                       type="button"
@@ -1622,7 +1717,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                     onChange={(e) => setNewWorkType(e.target.value)}
                     className="w-full rounded-lg border border-black/[0.1] bg-white px-2.5 py-2 text-xs"
                   >
-                    {WORK_TYPE_PRESETS.map((w) => (
+                    {(stdConfig?.work_types || DEFAULT_WORK_TYPE_NAMES).map((w) => (
                       <option key={w} value={w}>{w}</option>
                     ))}
                   </select>
@@ -1695,6 +1790,18 @@ export const StandardizationWorkspace: React.FC<Props> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {/* Church Taxonomy / Approval Line / PDF Cover Config Modal */}
+      {showConfigModal && stdConfig && (
+        <StdConfigModal
+          config={stdConfig}
+          onSaved={(next) => {
+            setStdConfig(next);
+            flashNotice('목포사랑의교회 표준화실 분류·결재선·PDF 표지 규격이 저장되었습니다.');
+          }}
+          onClose={() => setShowConfigModal(false)}
+        />
       )}
     </div>
   );

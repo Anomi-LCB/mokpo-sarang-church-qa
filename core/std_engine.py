@@ -14,21 +14,19 @@ from core.ingest import (
     _extract_txt_pages,
     _extract_xlsx_pages,
 )
+from core.std_config import DEFAULT_STD_CATEGORIES, load_std_config
 from core.std_store import StandardizationStore, get_std_uploads_dir
 from server.cli_providers import load_ai_config, stream_cli_with_failover
 
-# Canonical church administrative taxonomy for detecting deferred future categories
+# Canonical church administrative taxonomy (Mokpo Sarang Church 2025 Bylaws Art. 53)
 CHURCH_ADMIN_TAXONOMY: list[tuple[str, list[str]]] = [
-    ("예배·의전", ["예배", "성찬", "세례", "입교", "유아세례", "장례", "결혼", "임직식", "찬양", "헌금위원", "의전"]),
-    ("재정·회계", ["재정", "회계", "예산", "결산", "지출", "결의서", "영수증", "헌금", "사례비", "여비", "청구서", "감사"]),
-    ("교육·다음세대", ["교육", "주일학교", "유치부", "유년부", "초등부", "중등부", "고등부", "청년부", "교사", "수련회", "성경학교"]),
-    ("인사·복무", ["직원", "유급직원", "교역자", "휴가", "휴직", "복직", "안식월", "청빙", "사임", "근무", "출퇴근", "급여"]),
-    ("셀·교구·심방", ["셀지기", "셀사역", "교구", "구역", "지체지기", "심방", "새가족", "등록", "정착", "소그룹"]),
-    ("차량·시설·안전", ["차량", "버스", "운행", "주차", "시설", "대관", "비품", "안전", "소방", "건물", "관리"]),
-    ("선교·봉사·구제", ["선교", "구제", "봉사", "장학", "후원", "전도", "단기선교", "선교사", "지역섬김"]),
-    ("당회·제직회·치리", ["당회", "제직회", "공동의회", "노회", "총회", "청원", "권징", "회의록", "정관", "시행세칙"]),
-    ("미디어·행정홍보", ["주보", "방송", "영상", "음향", "홈페이지", "광고", "홍보", "사진", "문서발송"]),
+    (str(c["name"]), list(c["keywords"])) for c in DEFAULT_STD_CATEGORIES
 ]
+
+
+def _get_active_taxonomy(db: Database | None) -> list[tuple[str, list[str]]]:
+    cfg = load_std_config(db)
+    return [(str(c["name"]), list(c.get("keywords") or [])) for c in cfg.get("categories") or []] or CHURCH_ADMIN_TAXONOMY
 
 
 def extract_submission_file_text(path: Path) -> str:
@@ -54,14 +52,16 @@ def _heuristic_analyze(
     title: str,
     notes: str,
     extracted_text: str,
+    taxonomy: list[tuple[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     """Fast 100% offline-resilient analyzer detecting tags, cluster key, and cross-board routing."""
     combined = f"{title}\n{notes}\n{extracted_text[:6000]}"
     compact = re.sub(r"\s+", "", combined).lower()
+    active_tax = taxonomy or CHURCH_ADMIN_TAXONOMY
 
     # Score against taxonomy
     cat_scores: list[tuple[str, int, list[str]]] = []
-    for cat_name, kws in CHURCH_ADMIN_TAXONOMY:
+    for cat_name, kws in active_tax:
         hits = [kw for kw in kws if kw in compact]
         if hits:
             score = sum(min(4, compact.count(kw)) * 10 for kw in hits)
@@ -169,12 +169,14 @@ async def analyze_submission_and_cross_routes(
 ) -> dict[str, Any]:
     """Analyze a newly uploaded submission, detect cross-board Move/Copy/Merge/Deferred memory, and optionally auto-route."""
     all_boards = store.list_boards()
+    active_tax = _get_active_taxonomy(db)
     heur = _heuristic_analyze(
         board=board,
         all_boards=all_boards,
         title=submission["title"],
         notes=submission["notes"],
         extracted_text=submission["extracted_text"],
+        taxonomy=active_tax,
     )
 
     result = heur
@@ -184,8 +186,12 @@ async def analyze_submission_and_cross_routes(
             for b in all_boards
             if b["id"] != board["id"]
         ) or "(현재 다른 모집 게시글 없음)"
+        tax_names = ", ".join(name for name, _ in active_tax)
         prompt = f"""당신은 목포사랑의교회 행정 문서 분류·표준화 전문 분석가입니다.
 아래 새로 제출된 행정 자료를 분석하여 순수 JSON만 출력하세요.
+
+[교회 공식 행정 분류 체계]
+{tax_names}
 
 [현재 게시글]
 제목: {board['title']} | 분류: {board['category']} | 작업형태: {board['work_type']}
@@ -208,7 +214,7 @@ async def analyze_submission_and_cross_routes(
   "suggestions": [
     {{
       "target_board_id": "위 목록 중 일치하는 다른 게시글 id (아직 해당 분류 게시글이 없으면 빈 문자열 '')",
-      "suggested_category": "추천 분류명 (예: 재정·회계, 차량·시설·안전)",
+      "suggested_category": "위 교회 공식 행정 분류 체계 중 추천 분류명 (예: 재정부, 차량관리부, 예배선교부)",
       "action_type": "move | copy | merge | deferred 중 하나",
       "confidence": 85,
       "reason": "왜 다른 분류로 이동/복사/병합하거나 향후 새 분류를 위해 기억해야 하는지 1~2문장 설명"

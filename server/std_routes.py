@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from core.config import DEFAULT_NOTEBOOK_ID
 from core.database import Database
 from core.ingest import SUPPORTED_EXTENSIONS, ingest_file, replace_document_file
+from core.std_config import load_std_config, reset_std_config, save_std_config
 from core.std_engine import (
     analyze_submission_and_cross_routes,
     execute_cross_action_sync,
@@ -98,6 +99,15 @@ class CommentCreateReq(BaseModel):
 class CompileReq(BaseModel):
     version_label: str = Field(default="", max_length=30)
     custom_directives: str = Field(default="", max_length=2000)
+    approval_preset_id: str = Field(default="", max_length=40)
+    custom_approval_slots: list[str] | None = None
+
+
+class StdConfigUpdateReq(BaseModel):
+    categories: list[dict[str, Any]] | None = None
+    work_types: list[str] | None = None
+    approval_presets: list[dict[str, Any]] | None = None
+    pdf_template: dict[str, Any] | None = None
 
 
 class PublishToQaReq(BaseModel):
@@ -115,6 +125,48 @@ def _get_store(request: Request) -> StandardizationStore:
         store = StandardizationStore(db_path=db.db_path)
         request.app.state.std_store = store
     return store
+
+
+# ---- Church Taxonomy, Approval Lines & PDF Cover Template Config ----
+@router.get("/config")
+def get_std_config_route(request: Request, _: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    return load_std_config(request.app.state.db)
+
+
+@router.put("/config")
+def save_std_config_route(
+    body: StdConfigUpdateReq,
+    request: Request,
+    user: AuthUser = Depends(require_admin),
+) -> dict[str, Any]:
+    db: Database = request.app.state.db
+    current = load_std_config(db)
+    merged = {
+        "categories": body.categories if body.categories is not None else current["categories"],
+        "work_types": body.work_types if body.work_types is not None else current["work_types"],
+        "approval_presets": body.approval_presets if body.approval_presets is not None else current["approval_presets"],
+        "pdf_template": body.pdf_template if body.pdf_template is not None else current["pdf_template"],
+    }
+    saved = save_std_config(db, merged)
+    db.log_audit(
+        "std_config_updated",
+        user.role,
+        user.label,
+        get_client_ip(request),
+        f"분류 {len(saved['categories'])}개 · 결재선 {len(saved['approval_presets'])}개 수정",
+    )
+    return saved
+
+
+@router.post("/config/reset")
+def reset_std_config_route(
+    request: Request,
+    user: AuthUser = Depends(require_admin),
+) -> dict[str, Any]:
+    db: Database = request.app.state.db
+    cfg = reset_std_config(db)
+    db.log_audit("std_config_reset", user.role, user.label, get_client_ip(request), "2025 시행세칙 기본 규격 복원")
+    return cfg
 
 
 # ---- Boards ----
@@ -516,6 +568,8 @@ async def compile_publication_stream(
                 version_label=body.version_label,
                 custom_directives=body.custom_directives,
                 created_by=user.label,
+                approval_preset_id=body.approval_preset_id,
+                custom_approval_slots=body.custom_approval_slots,
             ):
                 ev = item.pop("event", "stage")
                 yield _sse(ev, item)

@@ -413,6 +413,8 @@ export interface StdPublication {
   committee_report: {
     ai_engine?: string;
     pdf_engine?: string;
+    approval_preset_name?: string;
+    approval_slots?: string[];
     submission_count?: number;
     proposal_count?: number;
     comment_count?: number;
@@ -433,4 +435,39 @@ export interface StdBoardDetail {
   comments: StdComment[];
   memories: StdCrossMemory[];
   publications: StdPublication[];
+}
+
+export interface StdCategoryItem {
+  name: string;
+  keywords: string[];
+  approval_preset_id: string;
+}
+
+export interface StdApprovalPreset {
+  id: string;
+  name: string;
+  slots: string[];
+  basis: string;
+}
+
+export interface StdPdfTemplate {
+  denomination_header: string;
+  church_name: string;
+  committee_label: string;
+  footer_left: string;
+  footer_right: string;
+  default_recipient: string;
+  default_submit_statement: string;
+  accent_color: string;
+  default_approval_preset_id: string;
+  show_cover_approval_box: boolean;
+  show_delegation_footnote: boolean;
+  delegation_footnote: string;
+}
+
+export interface StdConfig {
+  categories: StdCategoryItem[];
+  work_types: string[];
+  approval_presets: StdApprovalPreset[];
+  pdf_template: StdPdfTemplate;
 }

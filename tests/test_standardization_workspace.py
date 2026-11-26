@@ -213,3 +213,71 @@ def test_standardization_full_lifecycle_cross_memory_voting_and_pdf_publish(tmp_
         assert r_pub_qa.status_code == 200, r_pub_qa.text
         doc_rec = r_pub_qa.json()["document"]
         assert doc_rec["status"] == "ready" and doc_rec["page_count"] >= 2
+
+
+def test_std_church_taxonomy_approval_lines_and_custom_pdf_cover(tmp_path: Path):
+    db_path = tmp_path / "std_cfg.db"
+    app = create_app(db_path=db_path)
+
+    with TestClient(app) as client:
+        r_admin = client.post("/api/auth/login", json={"pin": "0000", "label": "행정목사"})
+        assert r_admin.status_code == 200
+        h = {"Authorization": f"Bearer {r_admin.json()['token']}"}
+
+        # 1. Default config reflects 2025 목포사랑의교회 시행세칙 12 categories & delegation approval lines
+        cfg = client.get("/api/std/config", headers=h).json()
+        cat_names = [c["name"] for c in cfg["categories"]]
+        assert len(cat_names) == 12
+        assert "예배선교부" in cat_names and "재정부" in cat_names and "차량관리부" in cat_names
+        dept_ap = next(p for p in cfg["approval_presets"] if p["id"] == "dept_standard")
+        assert dept_ap["slots"] == ["총무", "부장", "지도교역자", "당회장"]
+        fin_ap = next(p for p in cfg["approval_presets"] if p["id"] == "finance")
+        assert fin_ap["slots"] == ["회계", "원회계", "재정부장", "당회장"]
+
+        # 2. Customize PDF cover header + add custom category + custom approval preset
+        cfg["categories"].append(
+            {"name": "신혼·청년사역국", "keywords": ["신혼교구", "태영아부", "청년"], "approval_preset_id": "custom_pastor"}
+        )
+        cfg["approval_presets"].append(
+            {"id": "custom_pastor", "name": "교구 맞춤 3단 결재", "slots": ["담당간사", "교구목사", "당회장"], "basis": "교구 실무 기준"}
+        )
+        cfg["pdf_template"]["denomination_header"] = "대한예수교장로회 · 목포사랑의교회 맞춤형 표준 규정집"
+        cfg["pdf_template"]["default_recipient"] = "목포사랑의교회 담임목사(당회장) 귀하"
+        r_save = client.put("/api/std/config", headers=h, json=cfg)
+        assert r_save.status_code == 200
+
+        # 3. Create board in customized category and compile PDF -> verify custom cover & vertical approval box appear!
+        b = client.post(
+            "/api/std/boards",
+            headers=h,
+            json={"title": "신혼교구 심방 규정 표준화", "category": "신혼·청년사역국", "work_type": "부서 업무 매뉴얼"},
+        ).json()
+        client.post(
+            f"/api/std/boards/{b['id']}/submissions",
+            headers=h,
+            data={"title": "심방 보고서 초안", "notes": "신혼교구 심방 결과 보고 양식", "use_ai": "false"},
+        )
+        r_comp = client.post(
+            f"/api/std/boards/{b['id']}/compile/stream",
+            headers=h,
+            json={"version_label": "v1.0"},
+        )
+        assert r_comp.status_code == 200
+        pub_id = ""
+        for line in r_comp.text.splitlines():
+            if line.startswith("data:") and '"publication"' in line:
+                pub_obj = json.loads(line[5:].strip())["publication"]
+                pub_id = pub_obj["id"]
+                assert pub_obj["committee_report"]["approval_slots"] == ["담당간사", "교구목사", "당회장"]
+        assert pub_id
+
+        prev_html = client.get(f"/api/std/publications/{pub_id}/preview", headers=h).text
+        assert "목포사랑의교회 맞춤형 표준 규정집" in prev_html
+        assert "담당간사" in prev_html and "교구목사" in prev_html and "당회장" in prev_html
+        assert "결<br/>재" in prev_html
+        assert "목포사랑의교회 담임목사(당회장) 귀하" in prev_html
+
+        # 4. Reset restores official 12-department defaults cleanly
+        r_rst = client.post("/api/std/config/reset", headers=h)
+        assert r_rst.status_code == 200
+        assert len(r_rst.json()["categories"]) == 12

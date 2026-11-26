@@ -18,6 +18,7 @@ import type {
   StdBoard,
   StdBoardDetail,
   StdComment,
+  StdConfig,
   StdCrossMemory,
   StdProposal,
   StdSubmission,
@@ -522,6 +523,10 @@ export const api = {
     }),
 
   // ---- Administrative Standardization Workspace ----
+  stdGetConfig: () => reqJson<StdConfig>('/api/std/config'),
+  stdSaveConfig: (payload: Partial<StdConfig>) =>
+    reqJson<StdConfig>('/api/std/config', { method: 'PUT', body: JSON.stringify(payload) }),
+  stdResetConfig: () => reqJson<StdConfig>('/api/std/config/reset', { method: 'POST' }),
   stdListBoards: () => reqJson<StdBoard[]>('/api/std/boards'),
   stdCreateBoard: (payload: {
     title: string;
