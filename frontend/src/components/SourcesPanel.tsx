@@ -235,7 +235,7 @@ export const SourcesPanel: React.FC<Props> = ({
           </p>
         </div>
 
-        <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5">
+        <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5 lg:absolute lg:top-1/2 lg:right-1.5 lg:-translate-y-1/2 lg:rounded-md lg:bg-white/95 lg:px-1 lg:py-0.5 lg:shadow-xs lg:ring-1 lg:ring-black/[0.06]">
           <button
             type="button"
             onClick={(e) => {
@@ -338,7 +338,7 @@ export const SourcesPanel: React.FC<Props> = ({
               onSelectSession(s.id);
             }
           }}
-          className={`group flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 transition ${
+          className={`group relative flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 transition ${
             isActive ? 'bg-white text-[#18181b] shadow-[0_1px_2px_rgba(0,0,0,0.05)]' : 'text-[#52525b] hover:bg-black/[0.04]'
           }`}
         >
@@ -381,7 +381,7 @@ export const SourcesPanel: React.FC<Props> = ({
               </div>
 
               {canModify && (
-                <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5">
+                <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5 lg:absolute lg:top-1/2 lg:right-1.5 lg:-translate-y-1/2 lg:rounded-md lg:bg-white/95 lg:px-1 lg:py-0.5 lg:shadow-xs lg:ring-1 lg:ring-black/[0.06]">
                   <button
                     type="button"
                     onClick={(e) => {
