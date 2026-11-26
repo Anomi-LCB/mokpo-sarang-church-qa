@@ -888,9 +888,9 @@ export function App() {
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden bg-white">
       {/* Bespoke Editorial Window Toolbar (48px) */}
-      <header className="safe-top relative z-30 flex min-h-[48px] shrink-0 items-center justify-between gap-2 border-b border-black/[0.075] bg-white/95 px-3 py-1 backdrop-blur-xl sm:px-4">
+      <header className="safe-top relative z-30 flex min-h-[48px] shrink-0 items-center justify-between gap-1.5 border-b border-black/[0.075] bg-white/95 px-2.5 py-1 backdrop-blur-xl sm:gap-2 sm:px-4">
         {/* Left: Sidebar Toggle + Minimal Brand + Workspace Switcher + Notebook */}
-        <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
+        <div className="flex min-w-0 shrink-0 items-center gap-1.5 sm:gap-2 lg:flex-1">
           {workspace === 'qa' && (
             <button
               type="button"
@@ -905,7 +905,7 @@ export function App() {
             </button>
           )}
 
-          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#18181b] text-white">
+          <div className="hidden h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#18181b] text-white sm:flex">
             <BookOpen className="h-3.5 w-3.5" strokeWidth={2} />
           </div>
 
@@ -999,7 +999,7 @@ export function App() {
         </div>
 
         {/* Right: Quiet Studio Toolbar Actions */}
-        <div className="flex shrink-0 flex-1 items-center justify-end gap-0.5 sm:gap-1">
+        <div className="flex shrink-0 items-center justify-end gap-0.5 sm:gap-1 lg:flex-1">
           {showUpdateBadge && updateInfo?.latest && (
             <button
               type="button"
@@ -1045,7 +1045,7 @@ export function App() {
                 onClick={() => setShowCommandPalette(true)}
                 title="전체 빠른 검색 (Ctrl+K)"
                 aria-label="전체 빠른 검색"
-                className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
               >
                 <Search className="h-3.5 w-3.5" />
                 <span className="hidden xl:inline">검색</span>
@@ -1059,12 +1059,12 @@ export function App() {
                 onClick={() => setShowGroupsModal(true)}
                 title="협업 그룹 · 초대 · 개설 권한 · 기기 간 복구"
                 aria-label="그룹 관리"
-                className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
               >
                 <Users className="h-3.5 w-3.5" />
                 <span className="hidden md:inline">그룹</span>
                 {groups.length > 0 && (
-                  <span className="rounded-full bg-[#0f4c81]/12 px-1.5 py-0.2 text-[10px] font-bold text-[#0f4c81]">
+                  <span className="hidden rounded-full bg-[#0f4c81]/12 px-1.5 py-0.2 text-[10px] font-bold text-[#0f4c81] sm:inline">
                     {groups.length}
                   </span>
                 )}
@@ -1076,7 +1076,7 @@ export function App() {
             type="button"
             onClick={handleNewChat}
             title="새 대화 시작"
-            className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+            className="chip-nowrap hidden items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:inline-flex"
           >
             <SquarePen className="h-4 w-4" />
             <span className="hidden xl:inline">새 대화</span>
@@ -1087,7 +1087,7 @@ export function App() {
             onClick={() => setShowFeedbackModal(true)}
             title="버그·불편·개선사항 제작자에게 제보"
             aria-label="버그 및 개선사항 제보"
-            className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+            className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
           >
             <Flag className="h-3.5 w-3.5" />
             <span className="hidden md:inline">제보</span>
@@ -1099,7 +1099,7 @@ export function App() {
                 type="button"
                 onClick={() => setAdminModalTab('connect')}
                 title="모바일 QR 연결 및 APK"
-                className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
               >
                 <QrCode className="h-4 w-4" />
                 <span className="hidden sm:inline">연결</span>
@@ -1109,7 +1109,7 @@ export function App() {
                 type="button"
                 onClick={() => setAdminModalTab(isAdmin && auth.is_default_pin ? 'security' : 'cli')}
                 title={isAdmin && auth.is_default_pin ? '설정 (기본 PIN 변경 권장)' : '환경 설정'}
-                className="chip-nowrap relative inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                className="chip-nowrap relative inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
               >
                 <SlidersHorizontal className="h-4 w-4" />
                 <span className="hidden sm:inline">설정</span>
