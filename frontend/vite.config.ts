@@ -9,8 +9,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:8765',
-      '/downloads': 'http://127.0.0.1:8765',
+      '/api': 'http://127.0.0.1:17865',
+      '/downloads': 'http://127.0.0.1:17865',
     },
   },
   build: {

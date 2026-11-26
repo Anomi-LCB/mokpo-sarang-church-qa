@@ -7,7 +7,7 @@ from pathlib import Path
 os.environ.setdefault("PYTHONUTF8", "1")
 
 APP_NAME = "목포사랑의교회 행정Q&A"
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 DEFAULT_UPDATE_REPO = "Anomi-LCB/mokpo-sarang-church-qa"
 DEFAULT_UPDATE_MANIFEST_URL = (
     f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest/download/update-manifest.json"
@@ -15,7 +15,7 @@ DEFAULT_UPDATE_MANIFEST_URL = (
 DEFAULT_UPDATE_RELEASES_API = (
     f"https://api.github.com/repos/{DEFAULT_UPDATE_REPO}/releases/latest"
 )
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 17865
 DEFAULT_NOTEBOOK_ID = "mokpo-sarang-church"
 DEFAULT_NOTEBOOK_NAME = "목포사랑의교회 법규·행정"
 DEFAULT_NOTEBOOK_DESC = (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -36,25 +37,85 @@ def _setup_noconsole_logging() -> None:
             sys.stderr = log_f  # type: ignore[assignment]
 
 
-def _is_port_healthy(port: int) -> bool:
+def _is_our_server_healthy(port: int) -> bool:
+    """Return True ONLY when *our* 목포사랑의교회 행정Q&A server is responding on `port`."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1.5) as resp:
-            return resp.status == 200
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/api/health", timeout=1.5) as resp:
+            if resp.status != 200:
+                return False
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            return isinstance(data, dict) and data.get("app") == APP_NAME
     except Exception:
         return False
 
 
 def _is_port_free(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.bind(("0.0.0.0", port))
-            return True
-        except OSError:
+    """
+    Strictly verify a port is unused on BOTH 127.0.0.1 and 0.0.0.0.
+    Prevents the Windows Winsock dual-bind trap where binding 0.0.0.0 succeeds
+    even while another program (e.g., Unified Office Suite) already listens on 127.0.0.1!
+    """
+    # 1. Active loopback probe (IPv4)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.25)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
             return False
+
+    # 2. Active loopback probe (IPv6, best effort)
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe6:
+            probe6.settimeout(0.25)
+            if probe6.connect_ex(("::1", port)) == 0:
+                return False
+    except OSError:
+        pass
+
+    # 3. Exclusive bind checks on both loopback and wildcard
+    for host in ("127.0.0.1", "0.0.0.0"):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                try:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                except OSError:
+                    pass
+            try:
+                s.bind((host, port))
+            except OSError:
+                return False
+    return True
+
+
+def _pick_port_or_existing(preferred_port: int, span: int = 25) -> tuple[int, bool]:
+    """
+    Scan preferred_port .. preferred_port+span-1:
+    - If our own 목포사랑의교회 행정Q&A server is already healthy on any port, return (port, True).
+    - Otherwise return the first strictly free port (port, False).
+    """
+    for cand in range(preferred_port, preferred_port + span):
+        if _is_our_server_healthy(cand):
+            return cand, True
+
+    for cand in range(preferred_port, preferred_port + span):
+        if _is_port_free(cand):
+            return cand, False
+
+    raise RuntimeError(f"사용 가능한 포트를 찾을 수 없습니다 ({preferred_port}~{preferred_port + span - 1}).")
+
+
+def _get_isolated_browser_profile() -> Path:
+    """Dedicated local profile directory so Edge/Chrome never mixes windows, cache, or Service Workers with other local web apps."""
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        prof = Path(local_app) / "MokpoSarangChurchQA" / "browser_profile"
+    else:
+        prof = get_data_dir() / "browser_profile"
+    prof.mkdir(parents=True, exist_ok=True)
+    return prof
 
 
 def _open_app_window(url: str) -> None:
-    """Open Edge or Chrome in clean frameless app mode, falling back to default browser."""
+    """Open Edge or Chrome in a dedicated, isolated frameless app window."""
     browser_candidates = [
         shutil.which("msedge"),
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -63,10 +124,20 @@ def _open_app_window(url: str) -> None:
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     ]
+    profile_dir = _get_isolated_browser_profile()
     for b in browser_candidates:
         if b and Path(b).exists():
             try:
-                subprocess.Popen([b, f"--app={url}", "--window-size=1280,860"])
+                subprocess.Popen(
+                    [
+                        b,
+                        f"--app={url}",
+                        f"--user-data-dir={profile_dir}",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--window-size=1280,860",
+                    ]
+                )
                 return
             except Exception:
                 pass
@@ -110,19 +181,15 @@ def _has_startup_shortcut() -> bool:
 
 def main() -> None:
     _setup_noconsole_logging()
-    port = int(os.environ.get("CHURCH_SEARCH_PORT", str(DEFAULT_PORT)))
+    preferred_port = int(os.environ.get("CHURCH_SEARCH_PORT", str(DEFAULT_PORT)))
 
-    # If already running on this port, simply open the UI window and exit cleanly
-    if _is_port_healthy(port):
+    # If our own app is already running, open its isolated window and exit cleanly.
+    # If another unrelated app occupies a port (even loopback-only), skip it automatically!
+    port, already_running = _pick_port_or_existing(preferred_port)
+    if already_running:
         if "--headless" not in sys.argv:
             _open_app_window(f"http://127.0.0.1:{port}")
         return
-
-    if not _is_port_free(port):
-        for cand in range(port + 1, port + 20):
-            if _is_port_free(cand):
-                port = cand
-                break
 
     os.environ["CHURCH_SEARCH_PORT"] = str(port)
     tray_ref: dict[str, pystray.Icon | None] = {"icon": None}
@@ -156,9 +223,9 @@ def main() -> None:
     server_thread.start()
 
     url = f"http://127.0.0.1:{port}"
-    # Wait up to 8s for server readiness
+    # Wait up to 8s for *our* server readiness
     for _ in range(40):
-        if _is_port_healthy(port):
+        if _is_our_server_healthy(port):
             break
         time.sleep(0.2)
 
