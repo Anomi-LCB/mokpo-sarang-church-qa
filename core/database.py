@@ -199,6 +199,37 @@ CREATE TABLE IF NOT EXISTS feedback_reports (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS member_directory (
+    owner_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL DEFAULT '교역자',
+    role TEXT NOT NULL DEFAULT 'member',
+    can_create_group INTEGER NOT NULL DEFAULT 0,
+    recovery_code_hash TEXT NOT NULL DEFAULT '',
+    last_seen_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collab_groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    invite_code TEXT NOT NULL UNIQUE,
+    created_by_owner_id TEXT NOT NULL DEFAULT '',
+    created_by_label TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collab_group_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    member_label TEXT NOT NULL DEFAULT '교역자',
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at TEXT NOT NULL,
+    UNIQUE (group_id, owner_id),
+    FOREIGN KEY (group_id) REFERENCES collab_groups(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_docs_notebook ON documents(notebook_id);
 CREATE INDEX IF NOT EXISTS idx_pages_doc ON pages(doc_id, page_no);
 CREATE INDEX IF NOT EXISTS idx_chunks_notebook_doc ON chunks(notebook_id, doc_id);
@@ -206,6 +237,7 @@ CREATE INDEX IF NOT EXISTS idx_forms_notebook ON forms_catalog(notebook_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON chat_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback_reports(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_group_members_owner ON collab_group_members(owner_id);
 """
 
 
@@ -233,14 +265,27 @@ class Database:
         with self.connect() as conn:
             conn.executescript(SCHEMA_SQL)
             # Safe idempotent column migrations for pre-existing DBs
+            doc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
+            if "is_pinned_default" not in doc_cols:
+                conn.execute("ALTER TABLE documents ADD COLUMN is_pinned_default INTEGER NOT NULL DEFAULT 0")
+                # Pin high-priority core church books by default on first upgrade
+                conn.execute("UPDATE documents SET is_pinned_default = 1 WHERE priority >= 70")
+            if "tags_json" not in doc_cols:
+                conn.execute("ALTER TABLE documents ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'")
             sess_cols = {r["name"] for r in conn.execute("PRAGMA table_info(chat_sessions)").fetchall()}
             if "owner_id" not in sess_cols:
                 conn.execute("ALTER TABLE chat_sessions ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
             if "is_shared" not in sess_cols:
                 conn.execute("ALTER TABLE chat_sessions ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 1")
+            if "group_id" not in sess_cols:
+                conn.execute("ALTER TABLE chat_sessions ADD COLUMN group_id TEXT NOT NULL DEFAULT ''")
             msg_cols = {r["name"] for r in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
             if "verification_json" not in msg_cols:
                 conn.execute("ALTER TABLE chat_messages ADD COLUMN verification_json TEXT NOT NULL DEFAULT '{}'")
+            if "author_label" not in msg_cols:
+                conn.execute("ALTER TABLE chat_messages ADD COLUMN author_label TEXT NOT NULL DEFAULT ''")
+            if "author_owner_id" not in msg_cols:
+                conn.execute("ALTER TABLE chat_messages ADD COLUMN author_owner_id TEXT NOT NULL DEFAULT ''")
 
     def ensure_default_notebook(self) -> dict[str, Any]:
         nb = self.get_notebook(DEFAULT_NOTEBOOK_ID)
@@ -417,6 +462,8 @@ class Database:
             for r in rows:
                 d = dict(r)
                 d["stored_path"] = resolve_stored_path(d.get("stored_path", ""), d.get("notebook_id"))
+                d["tags"] = json.loads(d.pop("tags_json", "[]") or "[]")
+                d["is_pinned_default"] = int(d.get("is_pinned_default", 0) or 0)
                 out.append(d)
             return out
 
@@ -427,7 +474,27 @@ class Database:
                 return None
             d = dict(row)
             d["stored_path"] = resolve_stored_path(d.get("stored_path", ""), d.get("notebook_id"))
+            d["tags"] = json.loads(d.pop("tags_json", "[]") or "[]")
+            d["is_pinned_default"] = int(d.get("is_pinned_default", 0) or 0)
             return d
+
+    def update_document_library_meta(
+        self,
+        doc_id: str,
+        is_pinned_default: bool | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        existing = self.get_document(doc_id)
+        if not existing:
+            return None
+        new_pin = int(bool(is_pinned_default)) if is_pinned_default is not None else int(existing.get("is_pinned_default", 0))
+        new_tags = [str(t).strip()[:24] for t in tags if str(t).strip()][:12] if tags is not None else existing.get("tags", [])
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE documents SET is_pinned_default = ?, tags_json = ? WHERE id = ?",
+                (new_pin, json.dumps(new_tags, ensure_ascii=False), doc_id),
+            )
+        return self.get_document(doc_id)
 
     def delete_document(self, doc_id: str) -> bool:
         with self.connect() as conn:
@@ -593,7 +660,7 @@ class Database:
             d["doc_path"] = resolve_stored_path(d.get("doc_path", ""), d.get("notebook_id"))
             return d
 
-    # ---- Chat History (Private + Team-Shared) ----
+    # ---- Chat History (Private + Group Collaborative + Team-Shared) ----
     def create_session(
         self,
         session_id: str,
@@ -602,22 +669,31 @@ class Database:
         title: str = "새 대화",
         owner_id: str = "",
         is_shared: bool = False,
+        group_id: str = "",
     ) -> dict[str, Any]:
         ts = now_iso()
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO chat_sessions(id, notebook_id, user_label, owner_id, is_shared, title, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO chat_sessions(id, notebook_id, user_label, owner_id, is_shared, group_id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, notebook_id, user_label, owner_id, int(bool(is_shared)), title, ts, ts),
+                (session_id, notebook_id, user_label, owner_id, int(bool(is_shared)), group_id or "", title, ts, ts),
             )
             row = conn.execute("SELECT * FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
             return dict(row)
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
+            row = conn.execute(
+                """
+                SELECT s.*, COALESCE(g.name, '') AS group_name
+                FROM chat_sessions s
+                LEFT JOIN collab_groups g ON g.id = s.group_id
+                WHERE s.id = ?
+                """,
+                (session_id,),
+            ).fetchone()
             return dict(row) if row else None
 
     def list_sessions(
@@ -625,29 +701,49 @@ class Database:
         notebook_id: str,
         owner_id: str = "",
         is_admin: bool = False,
-        limit: int = 50,
+        limit: int = 80,
     ) -> list[dict[str, Any]]:
+        group_ids = list(self.get_user_group_ids(owner_id)) if owner_id else []
         with self.connect() as conn:
             if is_admin:
-                # Admin sees their own private chats + all team-shared chats + legacy unassigned chats
                 rows = conn.execute(
                     """
                     SELECT s.*,
+                           COALESCE(g.name, '') AS group_name,
                            (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count
                     FROM chat_sessions s
+                    LEFT JOIN collab_groups g ON g.id = s.group_id
                     WHERE s.notebook_id = ?
-                      AND (s.is_shared = 1 OR s.owner_id = '' OR s.owner_id = ?)
-                    ORDER BY s.is_shared DESC, s.updated_at DESC
+                      AND (s.is_shared = 1 OR s.group_id != '' OR s.owner_id = '' OR s.owner_id = ?)
+                    ORDER BY CASE WHEN s.group_id != '' THEN 0 WHEN s.is_shared = 1 THEN 1 ELSE 2 END, s.updated_at DESC
                     LIMIT ?
                     """,
                     (notebook_id, owner_id, limit),
+                ).fetchall()
+            elif group_ids:
+                ph = ",".join("?" for _ in group_ids)
+                rows = conn.execute(
+                    f"""
+                    SELECT s.*,
+                           COALESCE(g.name, '') AS group_name,
+                           (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count
+                    FROM chat_sessions s
+                    LEFT JOIN collab_groups g ON g.id = s.group_id
+                    WHERE s.notebook_id = ?
+                      AND (s.is_shared = 1 OR s.owner_id = ? OR s.group_id IN ({ph}))
+                    ORDER BY CASE WHEN s.group_id != '' THEN 0 WHEN s.is_shared = 1 THEN 1 ELSE 2 END, s.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (notebook_id, owner_id, *group_ids, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
                     """
                     SELECT s.*,
+                           COALESCE(g.name, '') AS group_name,
                            (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS message_count
                     FROM chat_sessions s
+                    LEFT JOIN collab_groups g ON g.id = s.group_id
                     WHERE s.notebook_id = ?
                       AND (s.is_shared = 1 OR s.owner_id = ?)
                     ORDER BY s.is_shared DESC, s.updated_at DESC
@@ -662,19 +758,24 @@ class Database:
         session_id: str,
         title: str | None = None,
         is_shared: bool | None = None,
+        group_id: str | None = None,
     ) -> dict[str, Any] | None:
         existing = self.get_session(session_id)
         if not existing:
             return None
         new_title = title.strip()[:80] if title is not None and title.strip() else existing["title"]
-        new_shared = int(bool(is_shared)) if is_shared is not None else int(existing.get("is_shared", 0))
+        new_group = group_id.strip() if group_id is not None else str(existing.get("group_id") or "")
+        if new_group:
+            # Group-scoped chat should not simultaneously be leaked to non-members via team-wide flag
+            new_shared = 0
+        else:
+            new_shared = int(bool(is_shared)) if is_shared is not None else int(existing.get("is_shared", 0))
         with self.connect() as conn:
             conn.execute(
-                "UPDATE chat_sessions SET title = ?, is_shared = ?, updated_at = ? WHERE id = ?",
-                (new_title, new_shared, now_iso(), session_id),
+                "UPDATE chat_sessions SET title = ?, is_shared = ?, group_id = ?, updated_at = ? WHERE id = ?",
+                (new_title, new_shared, new_group, now_iso(), session_id),
             )
-            row = conn.execute("SELECT * FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
-            return dict(row) if row else None
+        return self.get_session(session_id)
 
     def rename_session(self, session_id: str, title: str) -> dict[str, Any] | None:
         return self.update_session(session_id, title=title)
@@ -694,13 +795,18 @@ class Database:
         forms: list[dict[str, Any]] | None = None,
         verification: dict[str, Any] | None = None,
         provider: str = "",
+        author_label: str = "",
+        author_owner_id: str = "",
     ) -> int:
         ts = now_iso()
         with self.connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO chat_messages(session_id, role, content, mode, citations_json, forms_json, verification_json, provider, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO chat_messages(
+                    session_id, role, content, mode, citations_json, forms_json,
+                    verification_json, provider, author_label, author_owner_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -711,6 +817,8 @@ class Database:
                     json.dumps(forms or [], ensure_ascii=False),
                     json.dumps(verification or {}, ensure_ascii=False),
                     provider,
+                    author_label[:60],
+                    author_owner_id[:48],
                     ts,
                 ),
             )
@@ -857,6 +965,262 @@ class Database:
         with self.connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS c FROM feedback_reports WHERE status != 'resolved'").fetchone()
             return int(row["c"]) if row else 0
+
+    # ---- Member Directory, Group Creator Grants & Collaboration Groups ----
+    def upsert_member(self, owner_id: str, label: str, role: str = "member") -> dict[str, Any]:
+        oid = (owner_id or "").strip()[:48]
+        if not oid:
+            return {"owner_id": "", "label": label, "role": role, "can_create_group": int(role == "admin")}
+        ts = now_iso()
+        clean_label = (label or "교역자").strip()[:40]
+        clean_role = "admin" if role == "admin" else "member"
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO member_directory(owner_id, label, role, can_create_group, last_seen_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id) DO UPDATE SET
+                    label = CASE WHEN excluded.label != '' THEN excluded.label ELSE member_directory.label END,
+                    role = excluded.role,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (oid, clean_label, clean_role, 1 if clean_role == "admin" else 0, ts),
+            )
+            row = conn.execute("SELECT * FROM member_directory WHERE owner_id = ?", (oid,)).fetchone()
+            return dict(row)
+
+    def get_member(self, owner_id: str) -> dict[str, Any] | None:
+        if not owner_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM member_directory WHERE owner_id = ?", (owner_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_members(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.owner_id, m.label, m.role, m.can_create_group,
+                       (CASE WHEN m.recovery_code_hash != '' THEN 1 ELSE 0 END) AS has_recovery_code,
+                       m.last_seen_at,
+                       (SELECT COUNT(*) FROM collab_group_members gm WHERE gm.owner_id = m.owner_id) AS group_count
+                FROM member_directory m
+                ORDER BY CASE WHEN m.role = 'admin' THEN 0 ELSE 1 END, m.last_seen_at DESC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def set_member_group_permission(self, owner_id: str, can_create_group: bool) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "UPDATE member_directory SET can_create_group = ? WHERE owner_id = ?",
+                (int(bool(can_create_group)), owner_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT owner_id, label, role, can_create_group, last_seen_at FROM member_directory WHERE owner_id = ?",
+                (owner_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def can_user_create_group(self, owner_id: str, role: str) -> bool:
+        if role == "admin":
+            return True
+        m = self.get_member(owner_id)
+        return bool(m and int(m.get("can_create_group", 0)) == 1)
+
+    def set_member_recovery_hash(self, owner_id: str, code_hash: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE member_directory SET recovery_code_hash = ? WHERE owner_id = ?",
+                (code_hash, owner_id),
+            )
+
+    def find_member_by_recovery_code(self, verifier: Any) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM member_directory WHERE recovery_code_hash != ''"
+            ).fetchall()
+            for r in rows:
+                d = dict(r)
+                if verifier(d["recovery_code_hash"]):
+                    return d
+            return None
+
+    @staticmethod
+    def _gen_invite_code() -> str:
+        import secrets as _sec
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        return "".join(_sec.choice(alphabet) for _ in range(6))
+
+    def create_group(
+        self,
+        name: str,
+        description: str,
+        creator_owner_id: str,
+        creator_label: str,
+    ) -> dict[str, Any]:
+        import uuid as _uuid
+        gid = "grp_" + _uuid.uuid4().hex[:10]
+        ts = now_iso()
+        with self.connect() as conn:
+            code = self._gen_invite_code()
+            for _ in range(10):
+                exists = conn.execute("SELECT 1 FROM collab_groups WHERE invite_code = ?", (code,)).fetchone()
+                if not exists:
+                    break
+                code = self._gen_invite_code()
+            conn.execute(
+                """
+                INSERT INTO collab_groups(id, name, description, invite_code, created_by_owner_id, created_by_label, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (gid, name.strip()[:60], description.strip()[:300], code, creator_owner_id, creator_label[:40], ts, ts),
+            )
+            if creator_owner_id:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO collab_group_members(group_id, owner_id, member_label, role, joined_at)
+                    VALUES (?, ?, ?, 'leader', ?)
+                    """,
+                    (gid, creator_owner_id, creator_label[:40], ts),
+                )
+        return self.get_group(gid)  # type: ignore[return-value]
+
+    def get_group(self, group_id: str) -> dict[str, Any] | None:
+        if not group_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM collab_groups WHERE id = ?", (group_id,)).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            mrows = conn.execute(
+                "SELECT owner_id, member_label, role, joined_at FROM collab_group_members WHERE group_id = ? ORDER BY CASE WHEN role='leader' THEN 0 ELSE 1 END, joined_at ASC",
+                (group_id,),
+            ).fetchall()
+            d["members"] = [dict(m) for m in mrows]
+            d["member_count"] = len(d["members"])
+            return d
+
+    def get_group_by_invite_code(self, code: str) -> dict[str, Any] | None:
+        clean = re.sub(r"[^A-Za-z0-9]", "", (code or "").strip()).upper()
+        if not clean:
+            return None
+        with self.connect() as conn:
+            row = conn.execute("SELECT id FROM collab_groups WHERE UPPER(invite_code) = ?", (clean,)).fetchone()
+            return self.get_group(row["id"]) if row else None
+
+    def get_user_group_ids(self, owner_id: str) -> set[str]:
+        if not owner_id:
+            return set()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT group_id FROM collab_group_members WHERE owner_id = ?",
+                (owner_id,),
+            ).fetchall()
+            return {str(r["group_id"]) for r in rows}
+
+    def is_group_member(self, group_id: str, owner_id: str) -> bool:
+        if not group_id or not owner_id:
+            return False
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM collab_group_members WHERE group_id = ? AND owner_id = ?",
+                (group_id, owner_id),
+            ).fetchone()
+            return row is not None
+
+    def get_group_member_role(self, group_id: str, owner_id: str) -> str:
+        if not group_id or not owner_id:
+            return ""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT role FROM collab_group_members WHERE group_id = ? AND owner_id = ?",
+                (group_id, owner_id),
+            ).fetchone()
+            return str(row["role"]) if row else ""
+
+    def list_groups(self, owner_id: str, is_admin: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            if is_admin:
+                rows = conn.execute("SELECT id FROM collab_groups ORDER BY updated_at DESC").fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT g.id FROM collab_groups g
+                    JOIN collab_group_members gm ON gm.group_id = g.id
+                    WHERE gm.owner_id = ?
+                    ORDER BY g.updated_at DESC
+                    """,
+                    (owner_id,),
+                ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            g = self.get_group(r["id"])
+            if g:
+                my_m = next((m for m in g["members"] if m["owner_id"] == owner_id), None)
+                g["is_member"] = bool(my_m)
+                g["my_role"] = my_m["role"] if my_m else ("admin" if is_admin else "")
+                out.append(g)
+        return out
+
+    def add_group_member(
+        self,
+        group_id: str,
+        owner_id: str,
+        member_label: str,
+        role: str = "member",
+    ) -> dict[str, Any] | None:
+        ts = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO collab_group_members(group_id, owner_id, member_label, role, joined_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(group_id, owner_id) DO UPDATE SET
+                    member_label = CASE WHEN excluded.member_label != '' THEN excluded.member_label ELSE collab_group_members.member_label END
+                """,
+                (group_id, owner_id, member_label[:40], role if role in ("leader", "member") else "member", ts),
+            )
+            conn.execute("UPDATE collab_groups SET updated_at = ? WHERE id = ?", (ts, group_id))
+        return self.get_group(group_id)
+
+    def remove_group_member(self, group_id: str, owner_id: str) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM collab_group_members WHERE group_id = ? AND owner_id = ?",
+                (group_id, owner_id),
+            )
+            conn.execute("UPDATE collab_groups SET updated_at = ? WHERE id = ?", (now_iso(), group_id))
+            return cur.rowcount > 0
+
+    def regenerate_group_invite_code(self, group_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            code = self._gen_invite_code()
+            for _ in range(10):
+                if not conn.execute("SELECT 1 FROM collab_groups WHERE invite_code = ?", (code,)).fetchone():
+                    break
+                code = self._gen_invite_code()
+            cur = conn.execute(
+                "UPDATE collab_groups SET invite_code = ?, updated_at = ? WHERE id = ?",
+                (code, now_iso(), group_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_group(group_id)
+
+    def delete_group(self, group_id: str) -> bool:
+        with self.connect() as conn:
+            # Unlink sessions so chats aren't broken when a group is deleted
+            conn.execute("UPDATE chat_sessions SET group_id = '' WHERE group_id = ?", (group_id,))
+            try:
+                conn.execute("UPDATE std_boards SET group_id = '' WHERE group_id = ?", (group_id,))
+            except sqlite3.OperationalError:
+                pass
+            cur = conn.execute("DELETE FROM collab_groups WHERE id = ?", (group_id,))
+            return cur.rowcount > 0
 
     # ---- Compact Offline Bundle Export (for iOS PWA IndexedDB & Android APK) ----
     def export_offline_bundle(self, notebook_id: str) -> dict[str, Any] | None:

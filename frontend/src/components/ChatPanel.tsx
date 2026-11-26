@@ -17,14 +17,16 @@ import {
   FileText,
   Loader2,
   ShieldCheck,
+  Users,
   Zap,
 } from 'lucide-react';
 import { api, triggerTicketDownload } from '../api';
-import type { AnswerMode, ChatMessage, Citation, FormItem, Notebook } from '../types';
+import type { AnswerMode, ChatMessage, ChatSession, Citation, FormItem, Notebook } from '../types';
 import { MarkdownView } from './MarkdownView';
 
 interface Props {
   notebook: Notebook | null;
+  activeSession?: ChatSession | null;
   messages: ChatMessage[];
   mode: AnswerMode;
   instantMode: boolean;
@@ -36,7 +38,7 @@ interface Props {
   onInstantToggle: (v: boolean) => void;
   onDoubleVerifyToggle: (v: boolean) => void;
   onSend: (query: string) => void;
-  onOpenViewer: (docId: string, pageNo: number) => void;
+  onOpenViewer: (docId: string, pageNo: number, highlightText?: string) => void;
   onOpenAutofill: (form: FormItem) => void;
 }
 
@@ -48,15 +50,23 @@ const DEFAULT_PROMPTS = [
 ];
 
 const MODE_LABELS: Record<string, string> = {
-  auto: '자율',
+  auto: '자동',
   practical: '실무 정리',
   strict: '원문 엄격',
   advisory: '적용·제안',
   instant: '즉시 검색',
 };
 
+const MOBILE_MODE_OPTS: Array<{ id: AnswerMode; label: string; desc: string }> = [
+  { id: 'auto', label: '자동', desc: '질문 성격을 파악해 원문 엄격·실무 정리·적용 제안을 스스로 조합합니다.' },
+  { id: 'practical', label: '실무', desc: '조항 근거를 바탕으로 절차·요건·기한을 표와 체크리스트로 정리합니다.' },
+  { id: 'strict', label: '원문', desc: '규정 원문 조항만 엄격히 인용하며 추측이나 확대 해석을 배제합니다.' },
+  { id: 'advisory', label: '제안', desc: '원문 근거에 더해 실무 적용 주의점과 행정 실행안을 함께 제안합니다.' },
+];
+
 export const ChatPanel: React.FC<Props> = ({
   notebook,
+  activeSession = null,
   messages,
   mode,
   instantMode,
@@ -134,17 +144,11 @@ export const ChatPanel: React.FC<Props> = ({
       {/* Mobile-only compact 4-mode bar */}
       <div className="flex items-center justify-between gap-2 border-b border-black/[0.06] bg-[#fafaf9] px-3 py-1.5 lg:hidden">
         <div className="inline-flex rounded-lg bg-black/[0.05] p-0.5">
-          {(
-            [
-              { id: 'auto', label: '자율' },
-              { id: 'practical', label: '실무' },
-              { id: 'strict', label: '원문' },
-              { id: 'advisory', label: '제안' },
-            ] as const
-          ).map((opt) => (
+          {MOBILE_MODE_OPTS.map((opt) => (
             <button
               key={opt.id}
               type="button"
+              title={opt.desc}
               onClick={() => onModeChange(opt.id)}
               className={`chip-nowrap rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
                 mode === opt.id ? 'bg-white text-[#18181b] shadow-2xs' : 'text-[#71717a]'
@@ -158,6 +162,23 @@ export const ChatPanel: React.FC<Props> = ({
           {selectedDocCount}/{totalDocCount}
         </span>
       </div>
+
+      {/* Group Collaborative Chat Banner */}
+      {activeSession && (activeSession.group_id || activeSession.is_shared) && (
+        <div className="flex items-center justify-between gap-2 border-b border-[#0f4c81]/15 bg-[#0f4c81]/[0.04] px-4 py-1.5 text-[11.5px] text-[#0f4c81]">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <Users className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate font-semibold">
+              {activeSession.group_id
+                ? `${activeSession.group_name || '그룹'} 공동 대화`
+                : '전체 팀 공유 대화'}
+            </span>
+            <span className="hidden truncate text-[#52525b] sm:inline">
+              · 참여자 누구나 이어서 질문할 수 있으며 실시간으로 동기화됩니다
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Serene Editorial Canvas */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 sm:px-8">
@@ -203,8 +224,13 @@ export const ChatPanel: React.FC<Props> = ({
             messages.map((msg, msgIdx) => (
               <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 {msg.role === 'user' ? (
-                  <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-[#18181b] px-4 py-2.5 text-[14px] leading-relaxed text-white sm:max-w-[76%]">
-                    {msg.content}
+                  <div className="flex max-w-[85%] flex-col items-end gap-1 sm:max-w-[76%]">
+                    {msg.author_label && (activeSession?.group_id || activeSession?.is_shared) && (
+                      <span className="px-1 text-[10.5px] font-medium text-[#71717a]">{msg.author_label}</span>
+                    )}
+                    <div className="rounded-2xl rounded-br-sm bg-[#18181b] px-4 py-2.5 text-[14px] leading-relaxed text-white">
+                      {msg.content}
+                    </div>
                   </div>
                 ) : (
                   <div className="group w-full min-w-0 space-y-3">
@@ -340,7 +366,7 @@ export const ChatPanel: React.FC<Props> = ({
                               </div>
                               <button
                                 type="button"
-                                onClick={() => onOpenViewer(c.doc_id, c.page_start)}
+                                onClick={() => onOpenViewer(c.doc_id, c.page_start, c.excerpt)}
                                 className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#f7f7f5] px-2 py-1 text-[11px] font-medium text-[#0f4c81] transition hover:bg-[#ededeb]"
                               >
                                 <Eye className="h-3 w-3" />

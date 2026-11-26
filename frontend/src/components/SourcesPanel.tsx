@@ -1,15 +1,21 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   Check,
+  ChevronRight,
   Eye,
   FileSpreadsheet,
   FileText,
+  Globe,
+  Library,
   Loader2,
   Lock,
   MessageSquare,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   RefreshCw,
+  Share2,
   SquarePen,
   Trash2,
   Upload,
@@ -17,25 +23,33 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../api';
-import type { ChatSession, DocumentItem } from '../types';
+import type { ChatSession, CollabGroup, DocumentItem } from '../types';
 import { AdminPinConfirmModal } from './AdminPinConfirmModal';
 import { UpdateDocumentModal } from './UpdateDocumentModal';
 
 interface Props {
   notebookId: string;
-  documents: DocumentItem[];
+  allDocumentCount: number;
+  pinnedDocs: DocumentItem[];
+  loadedDocs: DocumentItem[];
+  userPinnedIds: Set<string>;
   selectedDocIds: string[];
   sessions: ChatSession[];
+  groups: CollabGroup[];
   activeSessionId: string | null;
   currentOwnerId: string;
   isAdmin: boolean;
   onToggleDoc: (docId: string) => void;
   onSelectAll: (all: boolean) => void;
+  onToggleUserPin: (docId: string) => void;
+  onUnloadFromShelf: (docId: string) => void;
+  onOpenLibrary: () => void;
+  onOpenGroups: () => void;
   onOpenViewer: (docId: string, pageNo: number) => void;
   onSelectSession: (sessionId: string) => void;
   onNewChat: () => void;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
-  onToggleShareSession: (sessionId: string, nextShared: boolean) => Promise<void>;
+  onSetSessionScope: (sessionId: string, scope: { is_shared: boolean; group_id: string }) => Promise<void>;
   onDeleteSession: (sessionId: string) => Promise<void>;
   onRefresh: () => void;
 }
@@ -54,19 +68,27 @@ function formatShortTime(iso: string): string {
 
 export const SourcesPanel: React.FC<Props> = ({
   notebookId,
-  documents,
+  allDocumentCount,
+  pinnedDocs,
+  loadedDocs,
+  userPinnedIds,
   selectedDocIds,
   sessions,
+  groups,
   activeSessionId,
   currentOwnerId,
   isAdmin,
   onToggleDoc,
   onSelectAll,
+  onToggleUserPin,
+  onUnloadFromShelf,
+  onOpenLibrary,
+  onOpenGroups,
   onOpenViewer,
   onSelectSession,
   onNewChat,
   onRenameSession,
-  onToggleShareSession,
+  onSetSessionScope,
   onDeleteSession,
   onRefresh,
 }) => {
@@ -80,12 +102,27 @@ export const SourcesPanel: React.FC<Props> = ({
   const [error, setError] = useState('');
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [shareMenuSessionId, setShareMenuSessionId] = useState<string | null>(null);
   const [updateTarget, setUpdateTarget] = useState<DocumentItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DocumentItem | null>(null);
 
-  const allSelected = documents.length > 0 && selectedDocIds.length === documents.length;
-  const sharedSessions = sessions.filter((s) => Boolean(s.is_shared));
-  const privateSessions = sessions.filter((s) => !s.is_shared);
+  const shelfDocs = useMemo(() => [...pinnedDocs, ...loadedDocs], [pinnedDocs, loadedDocs]);
+  const shelfIds = useMemo(() => new Set(shelfDocs.map((d) => d.id)), [shelfDocs]);
+  const selectedOnShelfCount = useMemo(
+    () => selectedDocIds.filter((id) => shelfIds.has(id)).length,
+    [selectedDocIds, shelfIds]
+  );
+  const allSelected = shelfDocs.length > 0 && selectedOnShelfCount === shelfDocs.length;
+
+  const groupNameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const g of groups) map[g.id] = g.name;
+    return map;
+  }, [groups]);
+
+  const privateSessions = sessions.filter((s) => !s.is_shared && !s.group_id);
+  const groupSessions = sessions.filter((s) => Boolean(s.group_id));
+  const teamSessions = sessions.filter((s) => Boolean(s.is_shared) && !s.group_id);
 
   const handleFiles = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0 || !isAdmin) return;
@@ -122,6 +159,7 @@ export const SourcesPanel: React.FC<Props> = ({
 
   const startEditSession = (e: React.MouseEvent, s: ChatSession) => {
     e.stopPropagation();
+    setShareMenuSessionId(null);
     setEditingSessionId(s.id);
     setEditingTitle(s.title);
   };
@@ -133,104 +171,325 @@ export const SourcesPanel: React.FC<Props> = ({
     await onRenameSession(sessionId, trimmed);
   };
 
+  const renderDocRow = (doc: DocumentItem, isPinnedSection: boolean) => {
+    const selected = selectedDocIds.includes(doc.id);
+    const isAdminPin = Boolean(doc.is_pinned_default);
+    const isUserPin = userPinnedIds.has(doc.id);
+
+    return (
+      <div
+        key={doc.id}
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected}
+        onClick={() => onToggleDoc(doc.id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggleDoc(doc.id);
+          }
+        }}
+        className={`group relative flex cursor-pointer items-center gap-2 rounded-lg border px-2 py-2 transition outline-none focus-visible:ring-1 focus-visible:ring-[#0f4c81] ${
+          selected
+            ? 'border-[#0f4c81]/35 bg-white text-[#18181b] shadow-[0_1px_3px_rgba(15,76,129,0.08)]'
+            : 'border-transparent bg-transparent text-[#71717a] opacity-70 hover:bg-black/[0.04] hover:opacity-100'
+        }`}
+      >
+        {/* High-Contrast Selection Checkbox Badge */}
+        <span
+          aria-hidden="true"
+          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border transition ${
+            selected
+              ? 'border-[#0f4c81] bg-[#0f4c81] text-white'
+              : 'border-black/20 bg-white/80 text-transparent group-hover:border-black/35'
+          }`}
+        >
+          <Check className="h-2.5 w-2.5" strokeWidth={3} />
+        </span>
+
+        {doc.file_type === 'xlsx' ? (
+          <FileSpreadsheet
+            className={`h-3.5 w-3.5 shrink-0 ${selected ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`}
+            strokeWidth={1.8}
+          />
+        ) : (
+          <FileText
+            className={`h-3.5 w-3.5 shrink-0 ${selected ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`}
+            strokeWidth={1.8}
+          />
+        )}
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1">
+            <p className={`truncate text-[12.5px] leading-snug ${selected ? 'font-semibold text-[#18181b]' : 'font-normal'}`}>
+              {doc.title}
+            </p>
+            {isPinnedSection && isAdminPin && (
+              <span className="chip-nowrap shrink-0 rounded bg-[#0f4c81]/10 px-1 py-0.2 text-[9px] font-bold text-[#0f4c81]">
+                필수
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 truncate text-[10.5px] text-[#8a8a8e]">
+            {doc.category} · {doc.page_count}쪽
+          </p>
+        </div>
+
+        <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleUserPin(doc.id);
+            }}
+            title={isUserPin ? '개인 고정 해제' : '자주 쓰는 자료로 상단 고정'}
+            aria-label={isUserPin ? `${doc.title} 고정 해제` : `${doc.title} 상단 고정`}
+            className={`rounded p-1 transition hover:bg-black/[0.06] ${
+              isUserPin ? 'text-[#0f4c81]' : 'text-[#71717a] hover:text-[#18181b]'
+            }`}
+          >
+            {isUserPin ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+          </button>
+
+          {!isAdminPin && !isUserPin && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onUnloadFromShelf(doc.id);
+              }}
+              title="작업대에서 내리기 (라이브러리에는 안전하게 보관됨)"
+              aria-label={`${doc.title} 작업대에서 내리기`}
+              className="rounded p-1 text-[#8a8a8e] transition hover:bg-black/[0.06] hover:text-[#18181b]"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenViewer(doc.id, 1);
+            }}
+            title="원본 문서 보기"
+            aria-label={`${doc.title} 원본 보기`}
+            className="rounded p-1 text-[#71717a] transition hover:bg-black/[0.06] hover:text-[#18181b]"
+          >
+            <Eye className="h-3.5 w-3.5" />
+          </button>
+
+          {isAdmin && (
+            <>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setUpdateTarget(doc);
+                }}
+                title="자료 업데이트 · 파일 교체"
+                aria-label={`${doc.title} 업데이트`}
+                className="rounded p-1 text-[#71717a] transition hover:bg-black/[0.06] hover:text-[#18181b]"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteTarget(doc);
+                }}
+                title="자료 영구 삭제 (관리자 PIN 필요)"
+                aria-label={`${doc.title} 삭제`}
+                className="rounded p-1 text-[#8a8a8e] transition hover:bg-red-50 hover:text-red-600"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderSessionRow = (s: ChatSession) => {
     const isActive = s.id === activeSessionId;
     const isEditing = s.id === editingSessionId;
     const isShared = Boolean(s.is_shared);
+    const gid = s.group_id || '';
+    const gName = s.group_name || (gid ? groupNameMap[gid] : '');
     const canModify = isAdmin || (Boolean(s.owner_id) && s.owner_id === currentOwnerId);
+    const showShareMenu = shareMenuSessionId === s.id;
 
     return (
-      <div
-        key={s.id}
-        role="button"
-        tabIndex={0}
-        onClick={() => !isEditing && onSelectSession(s.id)}
-        onKeyDown={(e) => {
-          if (!isEditing && (e.key === 'Enter' || e.key === ' ')) {
-            e.preventDefault();
-            onSelectSession(s.id);
-          }
-        }}
-        className={`group flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 transition ${
-          isActive ? 'bg-white text-[#18181b] shadow-[0_1px_2px_rgba(0,0,0,0.04)]' : 'text-[#52525b] hover:bg-black/[0.04]'
-        }`}
-      >
-        {isShared ? (
-          <Users className={`h-3.5 w-3.5 shrink-0 ${isActive ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`} strokeWidth={1.8} />
-        ) : (
-          <MessageSquare className={`h-3.5 w-3.5 shrink-0 ${isActive ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`} strokeWidth={1.8} />
-        )}
+      <div key={s.id} className="relative">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => {
+            if (!isEditing) {
+              setShareMenuSessionId(null);
+              onSelectSession(s.id);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (!isEditing && (e.key === 'Enter' || e.key === ' ')) {
+              e.preventDefault();
+              onSelectSession(s.id);
+            }
+          }}
+          className={`group flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 transition ${
+            isActive ? 'bg-white text-[#18181b] shadow-[0_1px_2px_rgba(0,0,0,0.05)]' : 'text-[#52525b] hover:bg-black/[0.04]'
+          }`}
+        >
+          {gid ? (
+            <Users className={`h-3.5 w-3.5 shrink-0 ${isActive ? 'text-[#0f4c81]' : 'text-[#0f4c81]/70'}`} strokeWidth={1.9} />
+          ) : isShared ? (
+            <Globe className={`h-3.5 w-3.5 shrink-0 ${isActive ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`} strokeWidth={1.8} />
+          ) : (
+            <MessageSquare className={`h-3.5 w-3.5 shrink-0 ${isActive ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`} strokeWidth={1.8} />
+          )}
 
-        {isEditing ? (
-          <div className="flex min-w-0 flex-1 items-center gap-1" onClick={(e) => e.stopPropagation()}>
-            <input
-              type="text"
-              value={editingTitle}
-              onChange={(e) => setEditingTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void commitEditSession(s.id);
-                if (e.key === 'Escape') setEditingSessionId(null);
+          {isEditing ? (
+            <div className="flex min-w-0 flex-1 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+              <input
+                type="text"
+                value={editingTitle}
+                onChange={(e) => setEditingTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void commitEditSession(s.id);
+                  if (e.key === 'Escape') setEditingSessionId(null);
+                }}
+                autoFocus
+                className="min-w-0 flex-1 rounded border border-[#18181b] bg-white px-1.5 py-0.5 text-xs text-[#18181b] outline-none"
+              />
+              <button type="button" onClick={() => void commitEditSession(s.id)} aria-label="저장" className="rounded p-1 text-[#0f4c81] hover:bg-black/[0.05]">
+                <Check className="h-3 w-3" />
+              </button>
+              <button type="button" onClick={() => setEditingSessionId(null)} aria-label="취소" className="rounded p-1 text-[#71717a] hover:bg-black/[0.05]">
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="min-w-0 flex-1">
+                <p className={`truncate text-[12.5px] ${isActive ? 'font-semibold text-[#18181b]' : 'font-normal'}`}>{s.title}</p>
+                <p className="truncate text-[10.5px] text-[#8a8a8e]">
+                  {formatShortTime(s.updated_at)}
+                  {gid ? ` · ${gName || '그룹'}` : isShared ? ' · 전체 공유' : ''}
+                </p>
+              </div>
+
+              {canModify && (
+                <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShareMenuSessionId(showShareMenu ? null : s.id);
+                    }}
+                    title="공유 범위 변경 (비공개 / 그룹 공동 / 전체)"
+                    aria-label="대화 공유 범위 설정"
+                    className={`rounded p-1 transition hover:bg-black/[0.07] ${
+                      gid || isShared ? 'text-[#0f4c81]' : 'text-[#71717a] hover:text-[#18181b]'
+                    }`}
+                  >
+                    <Share2 className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => startEditSession(e, s)}
+                    title="대화 이름 변경"
+                    aria-label="대화 이름 변경"
+                    className="rounded p-1 text-[#71717a] transition hover:bg-black/[0.07] hover:text-[#18181b]"
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (window.confirm(`"${s.title}" 대화 기록을 삭제할까요?`)) {
+                        void onDeleteSession(s.id);
+                      }
+                    }}
+                    title="대화 삭제"
+                    aria-label="대화 삭제"
+                    className="rounded p-1 text-[#8a8a8e] transition hover:bg-red-50 hover:text-red-600"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Share Scope Popover */}
+        {showShareMenu && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1 space-y-0.5 rounded-xl border border-black/[0.1] bg-white p-1.5 shadow-lg"
+          >
+            <p className="px-2 py-0.5 text-[10px] font-semibold text-[#8a8a8e]">공유 범위 선택</p>
+            <button
+              type="button"
+              onClick={() => {
+                setShareMenuSessionId(null);
+                void onSetSessionScope(s.id, { is_shared: false, group_id: '' });
               }}
-              autoFocus
-              className="min-w-0 flex-1 rounded border border-[#18181b] bg-white px-1.5 py-0.5 text-xs text-[#18181b] outline-none"
-            />
-            <button type="button" onClick={() => void commitEditSession(s.id)} aria-label="저장" className="rounded p-1 text-[#0f4c81] hover:bg-black/[0.05]">
-              <Check className="h-3 w-3" />
+              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11.5px] transition ${
+                !gid && !isShared ? 'bg-[#0f4c81]/10 font-semibold text-[#0f4c81]' : 'text-[#3f3f46] hover:bg-[#f7f7f5]'
+              }`}
+            >
+              <Lock className="h-3 w-3 shrink-0" />
+              <span className="truncate">내 비공개 대화</span>
             </button>
-            <button type="button" onClick={() => setEditingSessionId(null)} aria-label="취소" className="rounded p-1 text-[#71717a] hover:bg-black/[0.05]">
-              <X className="h-3 w-3" />
+
+            {groups.map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => {
+                  setShareMenuSessionId(null);
+                  void onSetSessionScope(s.id, { is_shared: false, group_id: g.id });
+                }}
+                className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11.5px] transition ${
+                  gid === g.id ? 'bg-[#0f4c81]/10 font-semibold text-[#0f4c81]' : 'text-[#3f3f46] hover:bg-[#f7f7f5]'
+                }`}
+              >
+                <Users className="h-3 w-3 shrink-0" />
+                <span className="truncate">{g.name} (공동 대화)</span>
+              </button>
+            ))}
+
+            <button
+              type="button"
+              onClick={() => {
+                setShareMenuSessionId(null);
+                void onSetSessionScope(s.id, { is_shared: true, group_id: '' });
+              }}
+              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[11.5px] transition ${
+                !gid && isShared ? 'bg-[#0f4c81]/10 font-semibold text-[#0f4c81]' : 'text-[#3f3f46] hover:bg-[#f7f7f5]'
+              }`}
+            >
+              <Globe className="h-3 w-3 shrink-0" />
+              <span className="truncate">전체 팀 공유</span>
+            </button>
+
+            <div className="my-1 border-t border-black/[0.06]" />
+            <button
+              type="button"
+              onClick={() => {
+                setShareMenuSessionId(null);
+                onOpenGroups();
+              }}
+              className="flex w-full items-center justify-between rounded-lg px-2 py-1 text-left text-[11px] font-medium text-[#0f4c81] hover:bg-[#0f4c81]/5"
+            >
+              <span>그룹 관리 · 초대 참여</span>
+              <ChevronRight className="h-3 w-3" />
             </button>
           </div>
-        ) : (
-          <>
-            <div className="min-w-0 flex-1">
-              <p className={`truncate text-[12.5px] ${isActive ? 'font-semibold text-[#18181b]' : 'font-normal'}`}>{s.title}</p>
-              <p className="text-[10.5px] text-[#8a8a8e]">
-                {formatShortTime(s.updated_at)}
-                {isShared ? ' · 공유' : ''}
-              </p>
-            </div>
-
-            {canModify && (
-              <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void onToggleShareSession(s.id, !isShared);
-                  }}
-                  title={isShared ? '나만 보기(비공개)로 전환' : '팀 전체와 공유하기'}
-                  aria-label={isShared ? '비공개로 전환' : '팀에 공유'}
-                  className="rounded p-1 text-[#71717a] transition hover:bg-black/[0.07] hover:text-[#18181b]"
-                >
-                  {isShared ? <Lock className="h-3 w-3" /> : <Users className="h-3 w-3" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => startEditSession(e, s)}
-                  title="대화 이름 변경"
-                  aria-label="대화 이름 변경"
-                  className="rounded p-1 text-[#71717a] transition hover:bg-black/[0.07] hover:text-[#18181b]"
-                >
-                  <Pencil className="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (window.confirm(`"${s.title}" 대화 기록을 삭제할까요?`)) {
-                      void onDeleteSession(s.id);
-                    }
-                  }}
-                  title="대화 삭제"
-                  aria-label="대화 삭제"
-                  className="rounded p-1 text-[#8a8a8e] transition hover:bg-red-50 hover:text-red-600"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </button>
-              </div>
-            )}
-          </>
         )}
       </div>
     );
@@ -298,18 +557,18 @@ export const SourcesPanel: React.FC<Props> = ({
       )}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2.5 py-3">
-        {/* Section 1: Flat Finder-Style Clickable Document Rows */}
+        {/* Section 1: Workspace Shelf + Library Trigger */}
         <div>
-          <div className="mb-1.5 flex items-center justify-between gap-1.5 px-2">
+          <div className="mb-1.5 flex items-center justify-between gap-1.5 px-1.5">
             <div className="flex min-w-0 items-center gap-1.5">
-              <span className="text-[11px] font-semibold tracking-tight text-[#71717a]">검색 자료</span>
-              <span className="chip-nowrap text-[10.5px] font-medium text-[#8a8a8e]">
-                {selectedDocIds.length}/{documents.length}
+              <span className="text-[11px] font-semibold tracking-tight text-[#52525b]">검색 자료</span>
+              <span className="chip-nowrap rounded bg-[#0f4c81]/10 px-1.5 py-0.2 text-[10.5px] font-semibold text-[#0f4c81]">
+                {selectedOnShelfCount}/{shelfDocs.length} 선택
               </span>
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
-              {documents.length > 0 && (
+              {shelfDocs.length > 0 && (
                 <button
                   type="button"
                   onClick={() => onSelectAll(!allSelected)}
@@ -332,140 +591,122 @@ export const SourcesPanel: React.FC<Props> = ({
             </div>
           </div>
 
-          <div className="space-y-0.5">
-            {documents.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-black/[0.1] p-4 text-center text-xs text-[#8a8a8e]">
-                자료 없음
-              </div>
-            ) : (
-              documents.map((doc) => {
-                const selected = selectedDocIds.includes(doc.id);
-                return (
-                  <div
-                    key={doc.id}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={selected}
-                    onClick={() => onToggleDoc(doc.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        onToggleDoc(doc.id);
-                      }
-                    }}
-                    className={`group relative flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 transition outline-none focus-visible:ring-1 focus-visible:ring-[#18181b] ${
-                      selected
-                        ? 'bg-white text-[#18181b] shadow-[0_1px_2px_rgba(0,0,0,0.045)]'
-                        : 'text-[#71717a] hover:bg-black/[0.04] hover:text-[#3f3f46]'
-                    }`}
+          {/* Prominent Library (서고) Drawer Button */}
+          <button
+            type="button"
+            onClick={onOpenLibrary}
+            className="mb-2.5 flex w-full items-center justify-between gap-2 rounded-xl border border-black/[0.08] bg-white px-2.5 py-2 text-left transition hover:border-[#0f4c81]/40 hover:bg-[#fafaf9]"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <Library className="h-3.5 w-3.5 shrink-0 text-[#0f4c81]" />
+              <span className="truncate text-[12px] font-semibold text-[#18181b]">자료 라이브러리</span>
+            </div>
+            <div className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-[#71717a]">
+              <span className="chip-nowrap">전체 {allDocumentCount}권</span>
+              <ChevronRight className="h-3.5 w-3.5" />
+            </div>
+          </button>
+
+          {shelfDocs.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-black/[0.12] bg-white/60 p-4 text-center">
+              <p className="text-xs font-medium text-[#71717a]">
+                {allDocumentCount > 0 ? '작업대에 불러온 자료가 없습니다' : '등록된 자료가 없습니다'}
+              </p>
+              {allDocumentCount > 0 ? (
+                <button
+                  type="button"
+                  onClick={onOpenLibrary}
+                  className="chip-nowrap mt-2 inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
+                >
+                  <Library className="h-3 w-3" />
+                  <span>라이브러리에서 불러오기</span>
+                </button>
+              ) : (
+                isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="chip-nowrap mt-2 inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
                   >
-                    {/* Minimal refined left active indicator */}
-                    <span
-                      className={`h-4 w-[2.5px] shrink-0 rounded-full transition-colors ${
-                        selected ? 'bg-[#0f4c81]' : 'bg-transparent'
-                      }`}
-                    />
+                    <Upload className="h-3 w-3" />
+                    <span>첫 자료 올리기</span>
+                  </button>
+                )
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {pinnedDocs.length > 0 && (
+                <div className="space-y-1">
+                  <p className="flex items-center gap-1 px-1.5 text-[10px] font-semibold text-[#8a8a8e]">
+                    <Pin className="h-2.5 w-2.5 text-[#0f4c81]" />
+                    <span>고정됨</span>
+                  </p>
+                  {pinnedDocs.map((doc) => renderDocRow(doc, true))}
+                </div>
+              )}
 
-                    {doc.file_type === 'xlsx' ? (
-                      <FileSpreadsheet
-                        className={`h-3.5 w-3.5 shrink-0 ${selected ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`}
-                        strokeWidth={1.8}
-                      />
-                    ) : (
-                      <FileText
-                        className={`h-3.5 w-3.5 shrink-0 ${selected ? 'text-[#0f4c81]' : 'text-[#a1a1aa]'}`}
-                        strokeWidth={1.8}
-                      />
-                    )}
-
-                    <div className="min-w-0 flex-1">
-                      <p className={`truncate text-[12.5px] leading-snug ${selected ? 'font-semibold text-[#18181b]' : 'font-normal'}`}>
-                        {doc.title}
-                      </p>
-                      <p className="mt-0.5 truncate text-[10.5px] text-[#8a8a8e]">
-                        {doc.category} · {doc.page_count}쪽
-                      </p>
-                    </div>
-
-                    <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenViewer(doc.id, 1);
-                        }}
-                        title="원본 문서 보기"
-                        aria-label={`${doc.title} 원본 보기`}
-                        className="rounded p-1 text-[#71717a] transition hover:bg-black/[0.06] hover:text-[#18181b]"
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                      </button>
-                      {isAdmin && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setUpdateTarget(doc);
-                            }}
-                            title="자료 업데이트 · 파일 교체"
-                            aria-label={`${doc.title} 업데이트`}
-                            className="rounded p-1 text-[#71717a] transition hover:bg-black/[0.06] hover:text-[#18181b]"
-                          >
-                            <RefreshCw className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setDeleteTarget(doc);
-                            }}
-                            title="자료 삭제 (관리자 PIN 필요)"
-                            aria-label={`${doc.title} 삭제`}
-                            className="rounded p-1 text-[#8a8a8e] transition hover:bg-red-50 hover:text-red-600"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
+              {loadedDocs.length > 0 && (
+                <div className="space-y-1">
+                  {pinnedDocs.length > 0 && (
+                    <p className="px-1.5 text-[10px] font-semibold text-[#8a8a8e]">작업대 자료</p>
+                  )}
+                  {loadedDocs.map((doc) => renderDocRow(doc, false))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="my-4 border-t border-black/[0.06]" />
 
-        {/* Section 2: Saved Chat Pages */}
+        {/* Section 2: Saved Chat Pages (Private / Group Collaborative / Team) */}
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="mb-1.5 flex items-center justify-between gap-1.5 px-2">
-            <span className="text-[11px] font-semibold tracking-tight text-[#71717a]">저장된 대화</span>
-            <button
-              type="button"
-              onClick={onNewChat}
-              className="chip-nowrap inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
-            >
-              <SquarePen className="h-3 w-3" />
-              <span>새 대화</span>
-            </button>
+          <div className="mb-1.5 flex items-center justify-between gap-1.5 px-1.5">
+            <span className="text-[11px] font-semibold tracking-tight text-[#52525b]">대화</span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={onOpenGroups}
+                title="그룹 초대 · 참여 관리"
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#0f4c81] transition hover:bg-[#0f4c81]/10"
+              >
+                <Users className="h-3 w-3" />
+                <span>그룹{groups.length > 0 ? ` ${groups.length}` : ''}</span>
+              </button>
+              <button
+                type="button"
+                onClick={onNewChat}
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+              >
+                <SquarePen className="h-3 w-3" />
+                <span>새 대화</span>
+              </button>
+            </div>
           </div>
 
           {sessions.length === 0 ? (
-            <p className="px-2 py-2 text-[11px] text-[#8a8a8e]">저장된 대화 없음</p>
+            <p className="px-2 py-2 text-[11px] leading-relaxed text-[#8a8a8e]">
+              저장된 대화가 없습니다. 질문을 시작하거나 그룹 초대를 받으면 여기에 표시됩니다.
+            </p>
           ) : (
-            <div className="space-y-2.5">
+            <div className="space-y-3">
+              {groupSessions.length > 0 && (
+                <div className="space-y-0.5">
+                  <p className="px-2 text-[10px] font-semibold text-[#0f4c81]">그룹 공동 대화</p>
+                  {groupSessions.map(renderSessionRow)}
+                </div>
+              )}
               {privateSessions.length > 0 && (
                 <div className="space-y-0.5">
-                  <p className="px-2 text-[10px] font-medium text-[#a1a1aa]">내 대화</p>
+                  <p className="px-2 text-[10px] font-semibold text-[#a1a1aa]">내 비공개 대화</p>
                   {privateSessions.map(renderSessionRow)}
                 </div>
               )}
-              {sharedSessions.length > 0 && (
+              {teamSessions.length > 0 && (
                 <div className="space-y-0.5">
-                  <p className="px-2 text-[10px] font-medium text-[#a1a1aa]">공유 대화</p>
-                  {sharedSessions.map(renderSessionRow)}
+                  <p className="px-2 text-[10px] font-semibold text-[#a1a1aa]">전체 팀 공유</p>
+                  {teamSessions.map(renderSessionRow)}
                 </div>
               )}
             </div>

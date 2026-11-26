@@ -51,12 +51,28 @@ def _prepare_sanitized_seed() -> Path:
         conn.execute("DELETE FROM chat_sessions")
         conn.execute("DELETE FROM audit_logs")
         conn.execute("DELETE FROM feedback_reports")
-        for tbl in ("std_votes", "std_proposal_options", "std_proposals", "std_comments", "std_cross_memory", "std_publications", "std_submissions", "std_boards"):
+        for tbl in (
+            "std_votes",
+            "std_proposal_options",
+            "std_proposals",
+            "std_comments",
+            "std_cross_memory",
+            "std_publications",
+            "std_submissions",
+            "std_boards",
+            "collab_group_members",
+            "collab_groups",
+            "member_directory",
+        ):
             try:
                 conn.execute(f"DELETE FROM {tbl}")
             except sqlite3.OperationalError:
                 pass
         conn.execute("DELETE FROM app_settings")
+        try:
+            conn.execute("UPDATE documents SET is_pinned_default = 1 WHERE priority >= 70")
+        except sqlite3.OperationalError:
+            pass
         rows = conn.execute("SELECT id, notebook_id, stored_path FROM documents").fetchall()
         for doc_id, nb_id, stored in rows:
             fname = Path(stored).name

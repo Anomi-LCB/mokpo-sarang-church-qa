@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS std_boards (
     submission_anonymous INTEGER NOT NULL DEFAULT 0,
     allow_vote_change INTEGER NOT NULL DEFAULT 1,
     auto_route_enabled INTEGER NOT NULL DEFAULT 0,
+    group_id TEXT NOT NULL DEFAULT '',
     created_by TEXT NOT NULL DEFAULT '관리자',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -177,6 +178,9 @@ class StandardizationStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(STD_SCHEMA_SQL)
+            bcols = {r["name"] for r in conn.execute("PRAGMA table_info(std_boards)").fetchall()}
+            if "group_id" not in bcols:
+                conn.execute("ALTER TABLE std_boards ADD COLUMN group_id TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -205,6 +209,7 @@ class StandardizationStore:
         submission_anonymous: bool = False,
         allow_vote_change: bool = True,
         auto_route_enabled: bool = False,
+        group_id: str = "",
         created_by: str = "관리자",
     ) -> dict[str, Any]:
         bid = "brd_" + uuid.uuid4().hex[:10]
@@ -216,8 +221,8 @@ class StandardizationStore:
                 INSERT INTO std_boards(
                     id, title, category, work_type, description, guidelines, status, deadline,
                     vote_visibility, submission_anonymous, allow_vote_change, auto_route_enabled,
-                    created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'collecting', ?, ?, ?, ?, ?, ?, ?, ?)
+                    group_id, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'collecting', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     bid,
@@ -231,6 +236,7 @@ class StandardizationStore:
                     int(bool(submission_anonymous)),
                     int(bool(allow_vote_change)),
                     int(bool(auto_route_enabled)),
+                    (group_id or "").strip()[:48],
                     created_by[:60],
                     ts,
                     ts,
@@ -238,11 +244,24 @@ class StandardizationStore:
             )
         return self.get_board(bid)  # type: ignore[return-value]
 
-    def list_boards(self) -> list[dict[str, Any]]:
+    def list_boards(
+        self,
+        allowed_group_ids: set[str] | None = None,
+        is_admin: bool = True,
+    ) -> list[dict[str, Any]]:
         with self.connect() as conn:
+            has_grp = bool(
+                conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='collab_groups'").fetchone()
+            )
+            grp_col = (
+                "COALESCE((SELECT g.name FROM collab_groups g WHERE g.id = b.group_id), '') AS group_name,"
+                if has_grp
+                else "'' AS group_name,"
+            )
             rows = conn.execute(
-                """
+                f"""
                 SELECT b.*,
+                       {grp_col}
                        (SELECT COUNT(*) FROM std_submissions s WHERE s.board_id = b.id AND s.status = 'active') AS submission_count,
                        (SELECT COUNT(*) FROM std_proposals p WHERE p.board_id = b.id) AS proposal_count,
                        (SELECT COUNT(*) FROM std_publications pub WHERE pub.board_id = b.id) AS publication_count,
@@ -252,13 +271,26 @@ class StandardizationStore:
                 ORDER BY b.updated_at DESC
                 """
             ).fetchall()
-            return [dict(r) for r in rows]
+            out = [dict(r) for r in rows]
+            if not is_admin:
+                allowed = allowed_group_ids or set()
+                out = [b for b in out if not b.get("group_id") or b.get("group_id") in allowed]
+            return out
 
     def get_board(self, board_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
+            has_grp = bool(
+                conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='collab_groups'").fetchone()
+            )
+            grp_col = (
+                "COALESCE((SELECT g.name FROM collab_groups g WHERE g.id = b.group_id), '') AS group_name,"
+                if has_grp
+                else "'' AS group_name,"
+            )
             row = conn.execute(
-                """
+                f"""
                 SELECT b.*,
+                       {grp_col}
                        (SELECT COUNT(*) FROM std_submissions s WHERE s.board_id = b.id AND s.status = 'active') AS submission_count,
                        (SELECT COUNT(*) FROM std_proposals p WHERE p.board_id = b.id) AS proposal_count,
                        (SELECT COUNT(*) FROM std_publications pub WHERE pub.board_id = b.id) AS publication_count,
@@ -287,6 +319,7 @@ class StandardizationStore:
             "submission_anonymous",
             "allow_vote_change",
             "auto_route_enabled",
+            "group_id",
         }
         sets: list[str] = []
         vals: list[Any] = []

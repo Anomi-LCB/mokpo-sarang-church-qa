@@ -26,11 +26,13 @@ import {
   Stamp,
   Trash2,
   Upload,
+  Users,
   Vote,
   X,
 } from 'lucide-react';
 import { api, authHeaders, triggerTicketDownload } from '../api';
 import type {
+  CollabGroup,
   DocumentItem,
   StdBoard,
   StdBoardDetail,
@@ -47,6 +49,10 @@ interface Props {
   currentOwnerId: string;
   qaDocuments: DocumentItem[];
   activeNotebookId: string;
+  groups?: CollabGroup[];
+  refreshTick?: number;
+  initialBoardId?: string;
+  onOpenGroups?: () => void;
   onQaDocumentsUpdated: () => void;
 }
 
@@ -86,9 +92,14 @@ export const StandardizationWorkspace: React.FC<Props> = ({
   currentOwnerId,
   qaDocuments,
   activeNotebookId,
+  groups = [],
+  refreshTick = 0,
+  initialBoardId = '',
+  onOpenGroups,
   onQaDocumentsUpdated,
 }) => {
   const [boards, setBoards] = useState<StdBoard[]>([]);
+  const [groupFilter, setGroupFilter] = useState<string>('all');
   const [activeBoardId, setActiveBoardId] = useState<string>('');
   const [detail, setDetail] = useState<StdBoardDetail | null>(null);
   const [globalMemories, setGlobalMemories] = useState<StdCrossMemory[]>([]);
@@ -105,11 +116,18 @@ export const StandardizationWorkspace: React.FC<Props> = ({
   const [compileApprovalPresetId, setCompileApprovalPresetId] = useState('');
   const [compileCustomSlots, setCompileCustomSlots] = useState('');
 
+  const leaderGroups = useMemo(
+    () => (isAdmin ? groups : groups.filter((g) => g.my_role === 'leader')),
+    [groups, isAdmin]
+  );
+  const canCreateBoard = isAdmin || leaderGroups.length > 0;
+
   // Create Board Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newCat, setNewCat] = useState('재정부');
   const [newWorkType, setNewWorkType] = useState('규정·서식 표준화');
+  const [newGroupId, setNewGroupId] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newGuide, setNewGuide] = useState('');
   const [newDeadline, setNewDeadline] = useState('');
@@ -202,8 +220,37 @@ export const StandardizationWorkspace: React.FC<Props> = ({
   }, [activeBoardId]);
 
   useEffect(() => {
-    void loadBoards();
+    void loadBoards(initialBoardId || undefined);
   }, []);
+
+  useEffect(() => {
+    if (initialBoardId && boards.some((b) => b.id === initialBoardId)) {
+      void handleSelectBoard(initialBoardId);
+    }
+  }, [initialBoardId]);
+
+  useEffect(() => {
+    if (refreshTick > 0) {
+      if (activeBoardId) {
+        void refreshActiveBoard(activeBoardId);
+      } else {
+        void loadBoards();
+      }
+    }
+  }, [refreshTick]);
+
+  const filteredBoards = useMemo(() => {
+    if (groupFilter === 'all') return boards;
+    if (groupFilter === 'public') return boards.filter((b) => !b.group_id);
+    return boards.filter((b) => b.group_id === groupFilter);
+  }, [boards, groupFilter]);
+
+  const openCreateBoardModal = () => {
+    if (!isAdmin && leaderGroups.length > 0 && !newGroupId) {
+      setNewGroupId(leaderGroups[0].id);
+    }
+    setShowCreateModal(true);
+  };
 
   const handleSelectBoard = async (bid: string) => {
     setShowGlobalMemoryView(false);
@@ -228,6 +275,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
         title: newTitle.trim(),
         category: newCat.trim() || '일반 행정',
         work_type: newWorkType.trim() || '규정·서식 표준화',
+        group_id: isAdmin ? newGroupId : newGroupId || leaderGroups[0]?.id || '',
         description: newDesc.trim(),
         guidelines: newGuide.trim(),
         deadline: newDeadline.trim(),
@@ -521,20 +569,22 @@ export const StandardizationWorkspace: React.FC<Props> = ({
             <FolderKanban className="h-4 w-4 text-[#0f4c81]" />
             <span className="text-xs font-semibold text-[#18181b]">행정 표준화 과제</span>
           </div>
-          {isAdmin && (
+          {canCreateBoard && (
             <div className="flex items-center gap-1">
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setShowConfigModal(true)}
+                  title="분류·부서 체계 및 교회 결재선·PDF 표지 설정"
+                  aria-label="표준화실 규격 및 결재선 설정"
+                  className="rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.06] hover:text-[#18181b]"
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => setShowConfigModal(true)}
-                title="분류·부서 체계 및 교회 결재선·PDF 표지 설정"
-                aria-label="표준화실 규격 및 결재선 설정"
-                className="rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.06] hover:text-[#18181b]"
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowCreateModal(true)}
+                onClick={openCreateBoardModal}
                 className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#18181b] px-2 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
               >
                 <Plus className="h-3 w-3" />
@@ -544,15 +594,54 @@ export const StandardizationWorkspace: React.FC<Props> = ({
           )}
         </div>
 
+        {/* Group Scope Filter Pills */}
+        {(groups.length > 0 || onOpenGroups) && (
+          <div className="flex flex-wrap items-center gap-1 border-b border-black/[0.06] px-2.5 py-2">
+            <button
+              type="button"
+              onClick={() => setGroupFilter('all')}
+              className={`chip-nowrap rounded-md px-2 py-0.5 text-[10.5px] font-semibold transition ${
+                groupFilter === 'all' ? 'bg-[#18181b] text-white' : 'bg-white text-[#52525b] hover:bg-black/[0.05]'
+              }`}
+            >
+              전체
+            </button>
+            <button
+              type="button"
+              onClick={() => setGroupFilter('public')}
+              className={`chip-nowrap rounded-md px-2 py-0.5 text-[10.5px] font-semibold transition ${
+                groupFilter === 'public' ? 'bg-[#18181b] text-white' : 'bg-white text-[#52525b] hover:bg-black/[0.05]'
+              }`}
+            >
+              공용
+            </button>
+            {groups.map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => setGroupFilter(g.id)}
+                className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10.5px] font-semibold transition ${
+                  groupFilter === g.id
+                    ? 'bg-[#0f4c81] text-white'
+                    : 'bg-white text-[#0f4c81] ring-1 ring-[#0f4c81]/20 hover:bg-[#0f4c81]/5'
+                }`}
+              >
+                <Users className="h-2.5 w-2.5" />
+                <span>{g.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex-1 space-y-1 overflow-y-auto p-2.5">
           {loading ? (
             <div className="flex justify-center py-8 text-[#8a8a8e]">
               <Loader2 className="h-4 w-4 animate-spin" />
             </div>
-          ) : boards.length === 0 ? (
+          ) : filteredBoards.length === 0 ? (
             <p className="px-2 py-6 text-center text-xs text-[#8a8a8e]">등록된 모집 게시글이 없습니다</p>
           ) : (
-            boards.map((b) => {
+            filteredBoards.map((b) => {
               const active = !showGlobalMemoryView && b.id === activeBoardId;
               const st = STATUS_META[b.status] || STATUS_META.collecting;
               return (
@@ -566,10 +655,13 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                 >
                   <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${st.dot}`} />
                   <div className="min-w-0 flex-1">
-                    <p className={`truncate text-[12.5px] ${active ? 'font-semibold text-[#18181b]' : 'font-medium text-[#3f3f46]'}`}>
-                      {b.title}
-                    </p>
+                    <div className="flex items-center gap-1">
+                      <p className={`truncate text-[12.5px] ${active ? 'font-semibold text-[#18181b]' : 'font-medium text-[#3f3f46]'}`}>
+                        {b.title}
+                      </p>
+                    </div>
                     <p className="mt-0.5 truncate text-[10.5px] text-[#8a8a8e]">
+                      {b.group_name ? `[${b.group_name}] ` : ''}
                       {b.category} · 자료 {b.submission_count} · 안건 {b.proposal_count}
                     </p>
                   </div>
@@ -622,10 +714,10 @@ export const StandardizationWorkspace: React.FC<Props> = ({
               ))
             )}
           </select>
-          {isAdmin && (
+          {canCreateBoard && (
             <button
               type="button"
-              onClick={() => setShowCreateModal(true)}
+              onClick={openCreateBoardModal}
               className="chip-nowrap rounded-lg bg-[#18181b] px-2.5 py-1.5 text-xs font-semibold text-white"
             >
               + 새 모집
@@ -727,10 +819,10 @@ export const StandardizationWorkspace: React.FC<Props> = ({
               <p className="text-xs leading-relaxed text-[#71717a]">
                 분류별 모집 게시글을 개설해 목사님들의 기존 행정 파일을 수합하고, AI 교차 분류 기억·투표 합의·4역할 전문가 위원회 검수를 거쳐 공식 정규 PDF를 편찬합니다.
               </p>
-              {isAdmin && (
+              {canCreateBoard && (
                 <button
                   type="button"
-                  onClick={() => setShowCreateModal(true)}
+                  onClick={openCreateBoardModal}
                   className="chip-nowrap inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#27272a]"
                 >
                   <Plus className="h-4 w-4" />
@@ -749,6 +841,12 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                     <span className={`chip-nowrap rounded-md px-2 py-0.5 text-[11px] font-semibold ${STATUS_META[detail.board.status].pill}`}>
                       {STATUS_META[detail.board.status].label}
                     </span>
+                    {detail.board.group_id && (
+                      <span className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#0f4c81] px-2 py-0.5 text-[11px] font-semibold text-white">
+                        <Users className="h-3 w-3" />
+                        <span>{detail.board.group_name || '전용 그룹'}</span>
+                      </span>
+                    )}
                     <span className="text-xs font-medium text-[#0f4c81]">{detail.board.category}</span>
                     <span className="text-xs text-[#8a8a8e]">· {detail.board.work_type}</span>
                     {detail.board.deadline && (
@@ -1732,6 +1830,25 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                   />
                 </div>
               </div>
+
+              {/* Group Visibility Scope */}
+              {(isAdmin || leaderGroups.length > 0) && (
+                <div>
+                  <label className="mb-1 block text-[11.5px] font-semibold text-[#52525b]">참여 범위 (공개 / 전용 그룹)</label>
+                  <select
+                    value={newGroupId}
+                    onChange={(e) => setNewGroupId(e.target.value)}
+                    className="w-full rounded-lg border border-black/[0.1] bg-white px-2.5 py-2 text-xs"
+                  >
+                    {isAdmin && <option value="">전체 교역자 공용 (모두 참여)</option>}
+                    {leaderGroups.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        그룹 전용: {g.name} ({g.member_count}명)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="mb-1 block text-[11.5px] font-semibold text-[#52525b]">수집 안내 및 목표</label>

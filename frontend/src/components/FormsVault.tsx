@@ -152,34 +152,34 @@ export const FormsVault: React.FC<Props> = ({
                 </button>
               </div>
 
-              <div className="mt-2 flex items-center justify-between gap-1 pl-5">
-                <div className="flex items-center gap-1.5">
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-x-1.5 gap-y-1.5 pl-4 pr-1">
+                <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
                     onClick={() => onOpenAutofill(f)}
                     className="chip-nowrap inline-flex items-center gap-1 rounded-md border border-black/[0.1] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#18181b] transition hover:border-[#18181b] hover:bg-[#18181b] hover:text-white"
                   >
-                    <FileEdit className="h-3 w-3" />
+                    <FileEdit className="h-3 w-3 shrink-0" />
                     <span>작성 · 미리보기</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => void triggerTicketDownload(`/api/forms/${f.id}/download/pdf`, `${f.title}.pdf`)}
-                    className="chip-nowrap inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                    className="chip-nowrap inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                   >
-                    <Download className="h-3 w-3" />
+                    <Download className="h-3 w-3 shrink-0" />
                     <span>PDF</span>
                   </button>
                 </div>
 
-                <div className="mac-hover-reveal flex shrink-0 items-center gap-0.5">
+                <div className="mac-hover-reveal flex flex-wrap items-center gap-0.5">
                   <button
                     type="button"
                     onClick={() => void triggerTicketDownload(`/api/forms/${f.id}/download/docx`, `${f.title}.docx`)}
                     title="편집용 워드(DOCX) 다운로드"
                     className="chip-nowrap inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10.5px] font-medium text-[#71717a] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                   >
-                    <FileText className="h-3 w-3" />
+                    <FileText className="h-3 w-3 shrink-0" />
                     <span>DOCX</span>
                   </button>
                   <button
@@ -188,7 +188,7 @@ export const FormsVault: React.FC<Props> = ({
                     title="엑셀(XLSX) 표 다운로드"
                     className="chip-nowrap inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10.5px] font-medium text-[#71717a] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                   >
-                    <FileSpreadsheet className="h-3 w-3" />
+                    <FileSpreadsheet className="h-3 w-3 shrink-0" />
                     <span>XLSX</span>
                   </button>
                 </div>

@@ -51,6 +51,8 @@ from server.cli_providers import (
     test_ai_connection,
 )
 from server.discovery import DiscoveryResponder
+from server.event_bus import RealtimeEventBus
+from server.groups_routes import router as groups_router
 from server.queue_manager import QueryQueueManager
 from server.std_routes import router as std_router
 from server.tunnel import NetworkTunnelManager
@@ -85,6 +87,7 @@ class NotebookUpdateReq(BaseModel):
 class ChatStreamReq(BaseModel):
     notebook_id: str = DEFAULT_NOTEBOOK_ID
     session_id: str | None = None
+    group_id: str = ""
     query: str = Field(..., min_length=1, max_length=3000)
     doc_ids: list[str] | None = None
     mode: str = Field(default="auto")  # auto | practical | strict | advisory
@@ -172,6 +175,12 @@ class TunnelActionReq(BaseModel):
 class SessionUpdateReq(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=80)
     is_shared: bool | None = None
+    group_id: str | None = None
+
+
+class DocumentLibraryMetaReq(BaseModel):
+    is_pinned_default: bool | None = None
+    tags: list[str] | None = None
 
 
 class DocumentMetaUpdateReq(BaseModel):
@@ -247,6 +256,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         app.state.queue = queue_mgr
         app.state.tunnel = tunnel_mgr
         app.state.updater = updater
+        app.state.events = RealtimeEventBus()
         app.state.discovery = discovery
         app.state.jobs = {}
         try:
@@ -257,6 +267,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
 
     app = FastAPI(title=APP_NAME, lifespan=lifespan)
     app.include_router(std_router)
+    app.include_router(groups_router)
 
     # Hardened CORS: reflect local/LAN/Tailscale/HTTPS origins safely instead of wildcard "*" with credentials
     app.add_middleware(
@@ -293,8 +304,10 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
     @app.post("/api/auth/login")
     def login(body: LoginReq, request: Request, response: Response) -> dict[str, Any]:
         auth: PinAuthManager = request.app.state.auth
+        db: Database = request.app.state.db
         ip = get_client_ip(request)
         user = auth.authenticate_pin(body.pin, client_ip=ip, label=body.label, client_id=body.client_id)
+        db.upsert_member(user.owner_id, user.label, user.role)
         token = auth.issue_token(user)
         is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
         auth.set_cookie(response, token, is_https=is_https)
@@ -303,6 +316,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
             "role": user.role,
             "label": user.label,
             "owner_id": user.owner_id,
+            "can_create_group": db.can_user_create_group(user.owner_id, user.role),
             "is_default_pin": auth.is_using_default_pins() if user.role == "admin" else False,
             "token": token,
         }
@@ -320,11 +334,13 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         user = auth.get_user_from_request(request)
         if not user:
             return {"authenticated": False}
+        db.upsert_member(user.owner_id, user.label, user.role)
         return {
             "authenticated": True,
             "role": user.role,
             "label": user.label,
             "owner_id": user.owner_id,
+            "can_create_group": db.can_user_create_group(user.owner_id, user.role),
             "is_default_pin": auth.is_using_default_pins() if user.role == "admin" else False,
             "default_double_verify": db.get_setting("default_double_verify", "0") == "1",
         }
@@ -877,10 +893,38 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
         )
 
-    # ---- Chat Sessions (Private + Team-Shared) & Streaming Grounded QA ----
-    def _can_access_session(sess: dict[str, Any], user: AuthUser) -> bool:
+    # ---- Document Library Pin / Tag Metadata ----
+    @app.patch("/api/documents/{doc_id}/library")
+    def update_document_library_route(
+        doc_id: str,
+        body: DocumentLibraryMetaReq,
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        db: Database = request.app.state.db
+        updated = db.update_document_library_meta(
+            doc_id,
+            is_pinned_default=body.is_pinned_default,
+            tags=body.tags,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
+        db.log_audit(
+            "doc_library_updated",
+            user.role,
+            user.label,
+            get_client_ip(request),
+            f"{updated['title']} 필수고정={updated['is_pinned_default']}",
+        )
+        return updated
+
+    # ---- Chat Sessions (Private + Group Collaborative + Team-Shared) & Streaming Grounded QA ----
+    def _can_access_session(db: Database, sess: dict[str, Any], user: AuthUser) -> bool:
+        gid = (sess.get("group_id") or "").strip()
         if user.role == "admin":
-            return bool(sess.get("is_shared")) or sess.get("owner_id", "") in ("", user.owner_id)
+            return bool(sess.get("is_shared")) or bool(gid) or sess.get("owner_id", "") in ("", user.owner_id)
+        if gid:
+            return db.is_group_member(gid, user.owner_id) or sess.get("owner_id", "") == user.owner_id
         return bool(sess.get("is_shared")) or sess.get("owner_id", "") == user.owner_id
 
     def _can_modify_session(sess: dict[str, Any], user: AuthUser) -> bool:
@@ -910,8 +954,8 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         sess = db.get_session(session_id)
         if not sess:
             raise HTTPException(status_code=404, detail="대화 기록을 찾을 수 없습니다.")
-        if not _can_access_session(sess, user):
-            raise HTTPException(status_code=403, detail="비공개 대화에 접근할 권한이 없습니다.")
+        if not _can_access_session(db, sess, user):
+            raise HTTPException(status_code=403, detail="비공개 또는 미참여 그룹 대화에 접근할 권한이 없습니다.")
         return db.get_session_messages(session_id)
 
     @app.patch("/api/sessions/{session_id}")
@@ -927,9 +971,21 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
             raise HTTPException(status_code=404, detail="대화 기록을 찾을 수 없습니다.")
         if not _can_modify_session(sess, user):
             raise HTTPException(status_code=403, detail="본인 대화 또는 관리자만 수정할 수 있습니다.")
-        updated = db.update_session(session_id, title=body.title, is_shared=body.is_shared)
+        if body.group_id is not None and body.group_id.strip():
+            gid = body.group_id.strip()
+            if not db.get_group(gid):
+                raise HTTPException(status_code=404, detail="선택한 그룹을 찾을 수 없습니다.")
+            if user.role != "admin" and not db.is_group_member(gid, user.owner_id):
+                raise HTTPException(status_code=403, detail="내가 속한 그룹에만 대화를 공유할 수 있습니다.")
+        updated = db.update_session(session_id, title=body.title, is_shared=body.is_shared, group_id=body.group_id)
         if not updated:
             raise HTTPException(status_code=404, detail="대화 기록을 찾을 수 없습니다.")
+        request.app.state.events.publish(
+            "chat_updated",
+            session_id=session_id,
+            group_id=updated.get("group_id", ""),
+            actor_label=user.label,
+        )
         return updated
 
     @app.delete("/api/sessions/{session_id}")
@@ -944,7 +1000,9 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
             raise HTTPException(status_code=404, detail="대화 기록을 찾을 수 없습니다.")
         if not _can_modify_session(sess, user):
             raise HTTPException(status_code=403, detail="본인 대화 또는 관리자만 삭제할 수 있습니다.")
+        gid = sess.get("group_id", "")
         db.delete_session(session_id)
+        request.app.state.events.publish("chat_updated", session_id=session_id, group_id=gid, actor_label=user.label)
         return {"ok": True}
 
     @app.post("/api/chat/stream")
@@ -955,6 +1013,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
     ) -> StreamingResponse:
         db: Database = request.app.state.db
         q_mgr: QueryQueueManager = request.app.state.queue
+        events: RealtimeEventBus = request.app.state.events
         nb = db.get_notebook(body.notebook_id)
         if not nb:
             raise HTTPException(status_code=404, detail="노트북을 찾을 수 없습니다.")
@@ -962,19 +1021,35 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         default_shared = db.get_setting("default_chat_shared", "0") == "1"
         session_id = body.session_id or ("sess_" + uuid.uuid4().hex[:10])
         existing_sess = db.get_session(session_id)
-        if existing_sess and not _can_access_session(existing_sess, user):
+        if existing_sess and not _can_access_session(db, existing_sess, user):
             session_id = "sess_" + uuid.uuid4().hex[:10]
+            existing_sess = None
+
+        req_group = (body.group_id or "").strip()
+        if req_group and user.role != "admin" and not db.is_group_member(req_group, user.owner_id):
+            req_group = ""
+        active_group_id = (existing_sess.get("group_id", "") if existing_sess else req_group) or ""
+
         db.create_session(
             session_id,
             body.notebook_id,
             user_label=user.label,
             title=body.query[:36],
             owner_id=user.owner_id,
-            is_shared=default_shared,
+            is_shared=(False if active_group_id else default_shared),
+            group_id=active_group_id,
         )
         history = db.get_session_messages(session_id)
         effective_mode = "instant" if body.instant else body.mode
-        db.add_message(session_id, "user", body.query, mode=effective_mode)
+        db.add_message(
+            session_id,
+            "user",
+            body.query,
+            mode=effective_mode,
+            author_label=user.label,
+            author_owner_id=user.owner_id,
+        )
+        events.publish("chat_updated", session_id=session_id, group_id=active_group_id, actor_label=user.label)
 
         ai_cfg = load_ai_config(db)
         provider_id = body.provider or (
@@ -1082,6 +1157,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                         verification=v_inst,
                         provider="local-instant",
                     )
+                    events.publish("chat_updated", session_id=session_id, group_id=active_group_id, actor_label=user.label)
                     db.log_audit("query_instant", user.role, user.label, client_ip, f"즉시 원문 검색 ({len(citations)}건)")
                     yield _sse("delta", {"text": instant_md})
                     yield _sse("verification", v_inst)
@@ -1222,6 +1298,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                     verification=verification,
                     provider=active_provider,
                 )
+                events.publish("chat_updated", session_id=session_id, group_id=active_group_id, actor_label=user.label)
                 db.log_audit(
                     "query_ai",
                     user.role,

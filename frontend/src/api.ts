@@ -7,14 +7,18 @@ import type {
   ChatSession,
   Citation,
   CliSettings,
+  CollabGroup,
   DocumentItem,
   FeedbackCategory,
   FeedbackInboxResponse,
   FeedbackItem,
   FeedbackStatus,
   FormItem,
+  GroupsResponse,
+  MemberDirectoryItem,
   NetworkSummary,
   Notebook,
+  QuickSearchResult,
   StdBoard,
   StdBoardDetail,
   StdComment,
@@ -304,6 +308,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+  updateDocumentLibrary: (docId: string, payload: { is_pinned_default?: boolean; tags?: string[] }) =>
+    reqJson<DocumentItem>(`/api/documents/${encodeURIComponent(docId)}/library`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
   replaceDocument: (
     docId: string,
     file: File,
@@ -352,9 +361,11 @@ export const api = {
         forms: FormItem[];
         verification?: VerificationResult;
         provider: string;
+        author_label?: string;
+        author_owner_id?: string;
       }>
     >(`/api/sessions/${encodeURIComponent(sessionId)}/messages`),
-  updateSession: (sessionId: string, payload: { title?: string; is_shared?: boolean }) =>
+  updateSession: (sessionId: string, payload: { title?: string; is_shared?: boolean; group_id?: string }) =>
     reqJson<ChatSession>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
@@ -522,6 +533,56 @@ export const api = {
       body: JSON.stringify({ kind }),
     }),
 
+  // ---- Groups, Invites, Member Permissions, Recovery & Quick Search ----
+  listGroups: () => reqJson<GroupsResponse>('/api/groups'),
+  createGroup: (name: string, description = '') =>
+    reqJson<CollabGroup>('/api/groups', { method: 'POST', body: JSON.stringify({ name, description }) }),
+  joinGroup: (invite_code: string) =>
+    reqJson<{ ok: boolean; group: CollabGroup }>('/api/groups/join', {
+      method: 'POST',
+      body: JSON.stringify({ invite_code }),
+    }),
+  inviteGroupMember: (groupId: string, owner_id: string, member_label = '') =>
+    reqJson<{ ok: boolean; group: CollabGroup }>(`/api/groups/${encodeURIComponent(groupId)}/invite`, {
+      method: 'POST',
+      body: JSON.stringify({ owner_id, member_label }),
+    }),
+  regenerateGroupCode: (groupId: string) =>
+    reqJson<{ ok: boolean; group: CollabGroup }>(`/api/groups/${encodeURIComponent(groupId)}/regenerate-code`, {
+      method: 'POST',
+    }),
+  getGroupInviteQr: (groupId: string) =>
+    reqJson<{ invite_code: string; join_url: string; qr_data_url: string }>(
+      `/api/groups/${encodeURIComponent(groupId)}/invite-qr`
+    ),
+  removeGroupMember: (groupId: string, memberOwnerId: string) =>
+    reqJson<{ ok: boolean }>(
+      `/api/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(memberOwnerId)}`,
+      { method: 'DELETE' }
+    ),
+  deleteGroup: (groupId: string) =>
+    reqJson<{ ok: boolean }>(`/api/groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' }),
+  listMembersAdmin: () => reqJson<MemberDirectoryItem[]>('/api/admin/members'),
+  setMemberGroupPermission: (ownerId: string, can_create_group: boolean) =>
+    reqJson<MemberDirectoryItem>(`/api/admin/members/${encodeURIComponent(ownerId)}/permissions`, {
+      method: 'PATCH',
+      body: JSON.stringify({ can_create_group }),
+    }),
+  setRecoveryCode: (code: string) =>
+    reqJson<{ ok: boolean }>('/api/auth/recovery-code', { method: 'POST', body: JSON.stringify({ code }) }),
+  claimRecoveryCode: async (code: string) => {
+    const res = await reqJson<{ ok: boolean; owner_id: string; label: string; role: 'member' | 'admin'; token: string }>(
+      '/api/auth/claim-recovery',
+      { method: 'POST', body: JSON.stringify({ code }) }
+    );
+    if (res.token) setStoredToken(res.token);
+    return res;
+  },
+  quickSearch: (q: string, notebookId = 'mokpo-sarang-church') =>
+    reqJson<QuickSearchResult>(
+      `/api/search/quick?notebook_id=${encodeURIComponent(notebookId)}&q=${encodeURIComponent(q)}`
+    ),
+
   // ---- Administrative Standardization Workspace ----
   stdGetConfig: () => reqJson<StdConfig>('/api/std/config'),
   stdSaveConfig: (payload: Partial<StdConfig>) =>
@@ -539,6 +600,7 @@ export const api = {
     submission_anonymous: boolean;
     allow_vote_change: boolean;
     auto_route_enabled: boolean;
+    group_id?: string;
   }) =>
     reqJson<StdBoard & { matched_memories?: StdCrossMemory[] }>('/api/std/boards', {
       method: 'POST',

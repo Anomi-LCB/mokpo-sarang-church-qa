@@ -43,6 +43,7 @@ class BoardCreateReq(BaseModel):
     submission_anonymous: bool = False
     allow_vote_change: bool = True
     auto_route_enabled: bool = False
+    group_id: str = Field(default="", max_length=48)
 
 
 class BoardUpdateReq(BaseModel):
@@ -57,6 +58,7 @@ class BoardUpdateReq(BaseModel):
     submission_anonymous: bool | None = None
     allow_vote_change: bool | None = None
     auto_route_enabled: bool | None = None
+    group_id: str | None = None
 
 
 class CrossMemoryActionReq(BaseModel):
@@ -169,20 +171,44 @@ def reset_std_config_route(
     return cfg
 
 
+def _assert_board_access(board: dict[str, Any], db: Database, user: AuthUser) -> None:
+    gid = (board.get("group_id") or "").strip()
+    if not gid or user.role == "admin":
+        return
+    if not db.is_group_member(gid, user.owner_id):
+        raise HTTPException(status_code=403, detail="이 표준화 과제는 초대된 그룹 멤버만 접근할 수 있습니다.")
+
+
+def _emit_std(request: Request, board_id: str, group_id: str = "", actor_label: str = "") -> None:
+    bus = getattr(request.app.state, "events", None)
+    if bus is not None:
+        bus.publish("std_updated", board_id=board_id, group_id=group_id, actor_label=actor_label)
+
+
 # ---- Boards ----
 @router.get("/boards")
-def list_boards(request: Request, _: AuthUser = Depends(require_user)) -> list[dict[str, Any]]:
-    return _get_store(request).list_boards()
+def list_boards(request: Request, user: AuthUser = Depends(require_user)) -> list[dict[str, Any]]:
+    db: Database = request.app.state.db
+    allowed_gids = db.get_user_group_ids(user.owner_id)
+    return _get_store(request).list_boards(allowed_group_ids=allowed_gids, is_admin=(user.role == "admin"))
 
 
 @router.post("/boards")
 def create_board(
     body: BoardCreateReq,
     request: Request,
-    user: AuthUser = Depends(require_admin),
+    user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     store = _get_store(request)
     db: Database = request.app.state.db
+    gid = (body.group_id or "").strip()
+    if user.role != "admin":
+        # Non-admin can create a board ONLY inside a group where they are group leader
+        if not gid or db.get_group_member_role(gid, user.owner_id) != "leader":
+            raise HTTPException(status_code=403, detail="관리자 또는 해당 그룹장만 표준화 모집 게시글을 개설할 수 있습니다.")
+    if gid and not db.get_group(gid):
+        raise HTTPException(status_code=404, detail="선택한 그룹을 찾을 수 없습니다.")
+
     board = store.create_board(
         title=body.title,
         category=body.category,
@@ -194,11 +220,13 @@ def create_board(
         submission_anonymous=body.submission_anonymous,
         allow_vote_change=body.allow_vote_change,
         auto_route_enabled=body.auto_route_enabled,
+        group_id=gid,
         created_by=user.label,
     )
     # Immediately wake up any deferred cross-board memories matching this newly created board!
     matched_memories = rematch_deferred_memories_for_board(store, board)
     db.log_audit("std_board_created", user.role, user.label, get_client_ip(request), f"표준화 게시글: {board['title']}")
+    _emit_std(request, board["id"], group_id=gid, actor_label=user.label)
     return {**board, "matched_memories": matched_memories}
 
 
@@ -209,9 +237,12 @@ def get_board_detail(
     user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     store = _get_store(request)
+    db: Database = request.app.state.db
     board = store.get_board(board_id)
     if not board:
         raise HTTPException(status_code=404, detail="모집 게시글을 찾을 수 없습니다.")
+    _assert_board_access(board, db, user)
+    _assert_board_access(board, db, user)
     mask_sub = bool(board.get("submission_anonymous")) and user.role != "admin"
     anon_votes = board.get("vote_visibility") == "anonymous"
     return {
@@ -268,6 +299,7 @@ async def create_submission(
     board = store.get_board(board_id)
     if not board:
         raise HTTPException(status_code=404, detail="모집 게시글을 찾을 수 없습니다.")
+    _assert_board_access(board, db, user)
 
     file_name = ""
     file_type = ""
@@ -479,6 +511,8 @@ def cast_vote(
     if prop["status"] != "open":
         raise HTTPException(status_code=400, detail="이미 마감된 투표 안건입니다.")
     board = store.get_board(prop["board_id"])
+    if board:
+        _assert_board_access(board, request.app.state.db, user)
     allow_change = bool(board.get("allow_vote_change", 1)) if board else True
     try:
         updated = store.cast_vote(
@@ -489,6 +523,8 @@ def cast_vote(
             comment=body.comment,
             allow_change=allow_change,
         )
+        if board:
+            _emit_std(request, board["id"], group_id=board.get("group_id", ""), actor_label=user.label)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "proposal": updated}
@@ -529,9 +565,11 @@ def add_comment(
     user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     store = _get_store(request)
-    if not store.get_board(board_id):
+    board = store.get_board(board_id)
+    if not board:
         raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
-    return store.add_comment(
+    _assert_board_access(board, request.app.state.db, user)
+    out = store.add_comment(
         board_id=board_id,
         content=body.content,
         author_label=user.label,
@@ -540,6 +578,8 @@ def add_comment(
         submission_id=body.submission_id,
         kind=body.kind,
     )
+    _emit_std(request, board_id, group_id=board.get("group_id", ""), actor_label=user.label)
+    return out
 
 
 # ---- 4-Role Expert Committee PDF Compilation & 1-Click Publish into Q&A ----

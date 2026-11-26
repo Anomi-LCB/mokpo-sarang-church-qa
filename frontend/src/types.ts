@@ -5,6 +5,7 @@ export interface AuthState {
   role?: 'member' | 'admin';
   label?: string;
   owner_id?: string;
+  can_create_group?: boolean;
   is_default_pin?: boolean;
   default_double_verify?: boolean;
 }
@@ -33,6 +34,8 @@ export interface DocumentItem {
   total_chars: number;
   chunk_count: number;
   form_count: number;
+  is_pinned_default?: number;
+  tags?: string[];
   status: string;
   error_msg: string;
   created_at: string;
@@ -80,6 +83,8 @@ export interface ChatSession {
   user_label: string;
   owner_id?: string;
   is_shared?: number | boolean;
+  group_id?: string;
+  group_name?: string;
   title: string;
   message_count?: number;
   created_at: string;
@@ -95,6 +100,8 @@ export interface ChatMessage {
   forms: FormItem[];
   verification?: VerificationResult;
   provider?: string;
+  author_label?: string;
+  author_owner_id?: string;
   hasEvidence?: boolean;
   streaming?: boolean;
   statusText?: string;
@@ -310,6 +317,8 @@ export interface StdBoard {
   submission_anonymous: number;
   allow_vote_change: number;
   auto_route_enabled: number;
+  group_id?: string;
+  group_name?: string;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -470,4 +479,50 @@ export interface StdConfig {
   work_types: string[];
   approval_presets: StdApprovalPreset[];
   pdf_template: StdPdfTemplate;
+}
+
+export interface CollabGroupMember {
+  owner_id: string;
+  member_label: string;
+  role: 'leader' | 'member';
+  joined_at: string;
+}
+
+export interface CollabGroup {
+  id: string;
+  name: string;
+  description: string;
+  invite_code: string;
+  created_by_owner_id: string;
+  created_by_label: string;
+  created_at: string;
+  updated_at: string;
+  member_count: number;
+  members: CollabGroupMember[];
+  is_member?: boolean;
+  my_role?: string;
+}
+
+export interface MemberDirectoryItem {
+  owner_id: string;
+  label: string;
+  role: 'admin' | 'member';
+  can_create_group: boolean | number;
+  has_recovery_code?: number;
+  group_count?: number;
+  last_seen_at: string;
+}
+
+export interface GroupsResponse {
+  groups: CollabGroup[];
+  can_create_group: boolean;
+  has_recovery_code: boolean;
+  members_directory: MemberDirectoryItem[];
+}
+
+export interface QuickSearchResult {
+  documents: DocumentItem[];
+  forms: FormItem[];
+  sessions: ChatSession[];
+  boards: StdBoard[];
 }

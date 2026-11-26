@@ -250,6 +250,69 @@ def main() -> None:
             audit_geometry(dpage, "Desktop-1440x900-Main")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_main.png"))
 
+            # Verify v3.0: '자율' renamed to '자동', mode hover popover explains each mode, and FormsVault DOCX/XLSX zero clipping
+            header_txt = dpage.locator("header").inner_text()
+            assert "자동" in header_txt and "자율" not in header_txt, f"Expected '자동' (not '자율') in header: {header_txt}"
+            auto_btn = dpage.locator('header button:has-text("자동")').first
+            auto_btn.hover()
+            dpage.wait_for_timeout(220)
+            tip_opacity = dpage.locator('header [role="tooltip"]').first.evaluate("el => parseFloat(getComputedStyle(el).opacity)")
+            assert tip_opacity > 0.9, f"Expected mode hover tooltip opacity > 0.9, got {tip_opacity}"
+            dpage.mouse.move(720, 450)
+            dpage.wait_for_timeout(150)
+
+            # Verify FormsVault DOCX/XLSX buttons fit inside inspector without right-edge clipping
+            clip_res = dpage.evaluate(
+                """() => {
+                    const insp = document.querySelector('aside[data-panel="inspector"]');
+                    if (!insp) return { checked: 0, clipped: [] };
+                    const ir = insp.getBoundingClientRect();
+                    const clipped = [];
+                    let checked = 0;
+                    for (const btn of insp.querySelectorAll('button')) {
+                        const txt = (btn.innerText || '').trim();
+                        if (txt === 'DOCX' || txt === 'XLSX' || txt === 'PDF') {
+                            const r = btn.getBoundingClientRect();
+                            if (r.width === 0 || r.height === 0 || r.top > window.innerHeight) continue;
+                            checked++;
+                            if (r.right > ir.right - 2) {
+                                clipped.push({ txt, btnRight: Math.round(r.right), inspRight: Math.round(ir.right) });
+                            }
+                        }
+                    }
+                    return { checked, clipped };
+                }"""
+            )
+            print(f"[AUDIT FormsVault-Buttons] checked={clip_res['checked']} clipped={len(clip_res['clipped'])}", flush=True)
+            assert clip_res["checked"] >= 3 and len(clip_res["clipped"]) == 0, f"FormsVault clipped buttons: {clip_res}"
+
+            # Open v3.0 Document Library (서고) Modal & audit
+            dpage.click('aside[data-panel="sidebar"] button:has-text("자료 라이브러리")')
+            dpage.wait_for_selector("text=전체 자료 라이브러리", timeout=6000)
+            dpage.wait_for_timeout(200)
+            audit_geometry(dpage, "Desktop-1440x900-LibraryModal")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_library.png"))
+            dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
+            dpage.wait_for_timeout(150)
+
+            # Open v3.0 Collaboration Groups & Permissions Modal & audit
+            dpage.click('header button[aria-label="그룹 관리"]')
+            dpage.wait_for_selector("text=그룹 · 초대 협업 관리", timeout=6000)
+            dpage.wait_for_timeout(200)
+            audit_geometry(dpage, "Desktop-1440x900-GroupsModal")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_groups.png"))
+            dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
+            dpage.wait_for_timeout(150)
+
+            # Open v3.0 Ctrl+K Unified Command Palette & audit
+            dpage.keyboard.press("Control+k")
+            dpage.wait_for_selector('input[placeholder*="빠르게 검색"]', timeout=6000)
+            dpage.wait_for_timeout(250)
+            audit_geometry(dpage, "Desktop-1440x900-CommandPalette")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_palette.png"))
+            dpage.keyboard.press("Escape")
+            dpage.wait_for_timeout(150)
+
             # Verify Left Sidebar collapse/expand via top toolbar PanelLeft
             assert dpage.locator('aside[data-panel="sidebar"]').is_visible()
             dpage.click('header button[aria-label="왼쪽 자료 패널 접기"]')

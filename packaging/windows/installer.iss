@@ -13,8 +13,8 @@
 [Setup]
 AppId={{8D6E4921-7C31-4F92-9A0E-C81D2B4F9102}
 AppName=목포사랑의교회 행정Q&A
-AppVersion=2.4.1
-AppVerName=목포사랑의교회 행정Q&A 2.4.1
+AppVersion=3.0.0
+AppVerName=목포사랑의교회 행정Q&A 3.0.0
 AppPublisher=목포사랑의교회 행정·법규 검색 시스템
 DefaultDirName={autopf}\목포사랑의교회 행정Q&A
 DefaultGroupName=목포사랑의교회 행정Q&A
@@ -41,7 +41,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Types]
 Name: "full"; Description: "전체 설치 (권장 — 프로그램 + 4대 법규 기본 자료 + Tailscale 원격 연결)"
-Name: "nodata"; Description: "빈 노트북 설치 (기본 자료 제외 — 새 문서만 직접 올려서 사용)"
+Name: "nodata"; Description: "빈 라이브러리 설치 (기본 자료 제외 — 새 문서만 직접 올려서 사용)"
 Name: "custom"; Description: "사용자 지정 설치"; Flags: iscustom
 
 [Components]
@@ -70,9 +70,9 @@ Source: "{#ProjectRoot}\dist\목포사랑의교회 행정Q&A\_internal\*"; DestD
 Source: "{#ProjectRoot}\dist\목포사랑의교회-행정Q&A.apk"; DestDir: "{app}\data\downloads"; Components: core; Flags: ignoreversion
 Source: "{#ProjectRoot}\dist\목포사랑의교회-행정Q&A.apk"; DestDir: "{app}\data\downloads"; DestName: "church-search.apk"; Components: core; Flags: ignoreversion
 
-; Optional default 4-book church dataset (pre-OCR'd 919p DB + 4 original PDFs, checked by default)
-Source: "{#SeedDir}\church_search.db"; DestDir: "{app}\data"; Components: churchdata; Flags: onlyifdoesntexist
-Source: "{#SeedDir}\notebooks\*"; DestDir: "{app}\data\notebooks"; Components: churchdata; Flags: ignoreversion recursesubdirs createallsubdirs
+; Optional default 4-book church dataset — installed ONLY when user explicitly consents on DataConsentPage
+Source: "{#SeedDir}\church_search.db"; DestDir: "{app}\data"; Components: churchdata; Check: ShouldInstallChurchData; Flags: onlyifdoesntexist
+Source: "{#SeedDir}\notebooks\*"; DestDir: "{app}\data\notebooks"; Components: churchdata; Check: ShouldInstallChurchData; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Bundled 100% offline Tailscale 64-bit Windows MSI
 Source: "{#ProjectRoot}\packaging\windows\redist\tailscale-setup-amd64.msi"; DestDir: "{tmp}"; Components: tailscale; Flags: deleteafterinstall
@@ -90,9 +90,15 @@ Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Description: "목포사�
 
 [Code]
 var
+  DataConsentPage: TInputOptionWizardPage;
   AiModePage: TInputOptionWizardPage;
   ApiProviderPage: TInputOptionWizardPage;
   ApiKeyPage: TInputQueryWizardPage;
+
+function ShouldInstallChurchData: Boolean;
+begin
+  Result := (DataConsentPage.SelectedValueIndex = 0) and WizardIsComponentSelected('churchdata');
+end;
 
 function NeedsTailscaleInstall: Boolean;
 begin
@@ -114,6 +120,21 @@ end;
 
 procedure InitializeWizard;
 begin
+  DataConsentPage := CreateInputOptionPage(
+    wpWelcome,
+    '목포사랑의교회 4대 법규 기본 자료 포함 설치 안내 및 이용 동의',
+    '설치 시 기본 법규·행정 자료(919쪽 · 서식 60종)를 함께 설치할지 선택해 주세요.',
+    '기본 자료(대한예수교장로회 헌법 · 헌법해설서 · 목포사랑의교회 정관 · 2025년 시행세칙 및 공문 서식 60종)는 목포사랑의교회 내부 행정·사역 용도로 제공됩니다.' + #13#10 +
+    '• 동의하고 함께 설치하면 설치 직후 인터넷 없이도 0.05초 원문 검색을 바로 사용할 수 있습니다.' + #13#10 +
+    '• 동의하지 않으시면 기본 자료 파일이 전혀 복사되지 않으며 깨끗한 빈 라이브러리로 시작합니다.' + #13#10 +
+    '• 대화 기록은 항상 빈 상태로 시작하며, 그룹 초대나 공유를 받을 때만 공동 대화가 표시됩니다.',
+    True,
+    False
+  );
+  DataConsentPage.Add('동의하고 목포사랑의교회 4대 기본 자료 함께 설치 (권장)');
+  DataConsentPage.Add('동의하지 않음 — 기본 자료 없이 깨끗한 빈 라이브러리로 설치');
+  DataConsentPage.SelectedValueIndex := 0;
+
   AiModePage := CreateInputOptionPage(
     wpSelectTasks,
     'AI 연결 방식 선택 (선택 사항)',
@@ -150,6 +171,18 @@ begin
   ApiKeyPage.Add('API 키 (로컬 Ollama는 비워도 됨):', True);
   ApiKeyPage.Add('모델명 (선택 — 비우면 권장 기본 모델 사용):', False);
   ApiKeyPage.Add('커스텀 Base URL (선택 — Ollama 예: http://localhost:11434/v1):', False);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if CurPageID = DataConsentPage.ID then
+  begin
+    if WizardForm.ComponentsList.Items.Count > 1 then
+    begin
+      WizardForm.ComponentsList.Checked[1] := (DataConsentPage.SelectedValueIndex = 0);
+    end;
+  end;
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;

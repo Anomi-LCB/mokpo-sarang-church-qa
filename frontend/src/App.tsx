@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUpCircle,
   BookOpen,
@@ -13,10 +13,12 @@ import {
   PlusSquare,
   QrCode,
   RefreshCw,
+  Search,
   Server,
   Share,
   SlidersHorizontal,
   SquarePen,
+  Users,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -24,13 +26,22 @@ import { api, authHeaders, isIOS, isStandalonePWA } from './api';
 import { AdminModal, type AdminTab } from './components/AdminModal';
 import { AutofillModal } from './components/AutofillModal';
 import { ChatPanel } from './components/ChatPanel';
+import { CommandPaletteModal } from './components/CommandPaletteModal';
 import { FeedbackModal } from './components/FeedbackModal';
 import { FormsVault } from './components/FormsVault';
+import { GroupsModal } from './components/GroupsModal';
+import { LibraryModal } from './components/LibraryModal';
 import { PageViewerModal } from './components/PageViewerModal';
 import { PinGate } from './components/PinGate';
 import { SourcesPanel } from './components/SourcesPanel';
 import { StandardizationWorkspace } from './components/StandardizationWorkspace';
 import { UpdateModal } from './components/UpdateModal';
+import {
+  loadShelfState,
+  resolveShelfDocuments,
+  saveShelfState,
+  type ShelfState,
+} from './libraryStore';
 import {
   bundleToDocuments,
   bundleToNotebook,
@@ -45,11 +56,44 @@ import type {
   AuthState,
   ChatMessage,
   ChatSession,
+  CollabGroup,
   DocumentItem,
   FormItem,
   Notebook,
   UpdateCheckResponse,
 } from './types';
+
+const ANSWER_MODES: Array<{
+  id: AnswerMode;
+  label: string;
+  badge: string;
+  desc: string;
+}> = [
+  {
+    id: 'auto',
+    label: '자동',
+    badge: '질문 맞춤 자동 조합',
+    desc: '질문 성격을 AI가 판단해 원문 조항 인용·실무 절차 정리·적용 제안을 가장 알맞게 조합해 답변합니다.',
+  },
+  {
+    id: 'practical',
+    label: '실무 정리',
+    badge: '절차·표·체크리스트',
+    desc: '근거 조항을 바탕으로 자격 요건·기한·담당 부서·처리 절차를 실무용 표와 단계별로 일목요연하게 정리합니다.',
+  },
+  {
+    id: 'strict',
+    label: '원문 엄격',
+    badge: '무추측 조항 그대로',
+    desc: '헌법·정관·시행세칙 원문에 명시된 내용만 엄격히 인용하며, 규정 밖의 해석이나 추측을 배제합니다.',
+  },
+  {
+    id: 'advisory',
+    label: '적용·제안',
+    badge: '근거 + 현장 실행안',
+    desc: '관련 규정 원문을 먼저 제시한 뒤, 실제 교회 행정 현장에서의 적용 유의점과 보완 실행안을 함께 제안합니다.',
+  },
+];
 
 function lastSessionKey(nbId: string): string {
   return `church_search_last_session_${nbId}`;
@@ -144,10 +188,22 @@ export function App() {
     }
   };
 
-  const [viewerTarget, setViewerTarget] = useState<{ docId: string; pageNo: number } | null>(null);
+  const [viewerTarget, setViewerTarget] = useState<{
+    docId: string;
+    pageNo: number;
+    highlightText?: string;
+  } | null>(null);
   const [autofillTarget, setAutofillTarget] = useState<FormItem | null>(null);
   const [adminModalTab, setAdminModalTab] = useState<AdminTab | null>(null);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [showLibraryModal, setShowLibraryModal] = useState(false);
+  const [showGroupsModal, setShowGroupsModal] = useState(false);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [shelf, setShelf] = useState<ShelfState>(() => loadShelfState('mokpo-sarang-church'));
+  const [groups, setGroups] = useState<CollabGroup[]>([]);
+  const [stdRefreshTick, setStdRefreshTick] = useState(0);
+  const [stdInitialBoardId, setStdInitialBoardId] = useState('');
+  const [globalNotice, setGlobalNotice] = useState('');
   const [workspace, setWorkspace] = useState<'qa' | 'std'>('qa');
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
@@ -158,6 +214,40 @@ export function App() {
       return '';
     }
   });
+
+  const activeNbIdRef = useRef(activeNbId);
+  activeNbIdRef.current = activeNbId;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+
+  const flashGlobalNotice = useCallback((msg: string) => {
+    setGlobalNotice(msg);
+    window.setTimeout(() => setGlobalNotice(''), 4200);
+  }, []);
+
+  const loadGroups = useCallback(async () => {
+    try {
+      const res = await api.listGroups();
+      setGroups(res.groups || []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Global Ctrl+K / Cmd+K Quick Command Palette
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        if (!auth?.authenticated || isOfflineMode) return;
+        e.preventDefault();
+        setShowCommandPalette((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [auth?.authenticated, isOfflineMode]);
 
   useEffect(() => {
     if (!auth?.authenticated || isOfflineMode) return;
@@ -290,6 +380,7 @@ export function App() {
           forms: r.forms || [],
           verification: r.verification && Object.keys(r.verification).length > 0 ? r.verification : undefined,
           provider: r.provider,
+          author_label: r.author_label || '',
           hasEvidence: r.provider !== 'grounding-gate',
           streaming: false,
         }))
@@ -319,7 +410,10 @@ export function App() {
           api.listSessions(nbId),
         ]);
         setDocuments(docs);
-        setSelectedDocIds(docs.filter((d) => d.status === 'ready').map((d) => d.id));
+        const nextShelf = loadShelfState(nbId);
+        setShelf(nextShelf);
+        const { allShelfDocs } = resolveShelfDocuments(docs, nextShelf);
+        setSelectedDocIds(allShelfDocs.filter((d) => d.status === 'ready').map((d) => d.id));
         setForms(frms);
         setSessions(sessList);
         void syncOfflineInBackground(nbId);
@@ -366,8 +460,107 @@ export function App() {
   useEffect(() => {
     if (auth?.authenticated && !isOfflineMode) {
       void loadNotebooks(undefined, true);
+      void loadGroups();
     }
-  }, [auth?.authenticated, isOfflineMode, loadNotebooks]);
+  }, [auth?.authenticated, isOfflineMode, loadNotebooks, loadGroups]);
+
+  // Handle ?join=INVITE_CODE auto-join from shared invite link / QR
+  useEffect(() => {
+    if (!auth?.authenticated || isOfflineMode) return;
+    const params = new URLSearchParams(window.location.search);
+    const code = (params.get('join') || '').trim();
+    if (!code) return;
+    const cleanUrl = `${window.location.pathname}${window.location.hash || ''}`;
+    window.history.replaceState({}, '', cleanUrl);
+    void api
+      .joinGroup(code)
+      .then((res) => {
+        void loadGroups();
+        void refreshSessions(activeNbIdRef.current);
+        setStdRefreshTick((t) => t + 1);
+        flashGlobalNotice(`"${res.group.name}" 그룹에 초대 코드로 참여했습니다.`);
+      })
+      .catch((err: unknown) => {
+        flashGlobalNotice(err instanceof Error ? err.message : '초대 코드 참여에 실패했습니다.');
+      });
+  }, [auth?.authenticated, isOfflineMode, loadGroups, refreshSessions, flashGlobalNotice]);
+
+  // Real-time Server-Sent Events (/api/events/stream) for live group chats & standardization boards
+  useEffect(() => {
+    if (!auth?.authenticated || isOfflineMode) return;
+    let disposed = false;
+    let controller = new AbortController();
+    let reconnectTimer: number | null = null;
+
+    const connect = async () => {
+      if (disposed) return;
+      controller = new AbortController();
+      try {
+        const res = await fetch('/api/events/stream', {
+          method: 'GET',
+          credentials: 'include',
+          headers: authHeaders({ Accept: 'text/event-stream' }),
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) throw new Error(`SSE ${res.status}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (!disposed) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.indexOf('\n\n')) !== -1) {
+            const block = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            let evName = 'message';
+            let dataStr = '';
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event:')) evName = line.slice(6).trim();
+              else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+            }
+            if (!dataStr || evName === 'connected' || evName === 'ping') continue;
+            try {
+              const payload = JSON.parse(dataStr);
+              if (evName === 'chat_updated') {
+                void refreshSessions(activeNbIdRef.current);
+                if (
+                  payload.session_id &&
+                  payload.session_id === sessionIdRef.current &&
+                  !busyRef.current
+                ) {
+                  void loadSessionMessages(payload.session_id, activeNbIdRef.current);
+                }
+              } else if (evName === 'std_updated') {
+                setStdRefreshTick((t) => t + 1);
+              } else if (evName === 'group_updated') {
+                void loadGroups();
+                void refreshSessions(activeNbIdRef.current);
+                setStdRefreshTick((t) => t + 1);
+              }
+            } catch {
+              // ignore malformed SSE chunk
+            }
+          }
+        }
+      } catch {
+        // automatic quiet reconnect below
+      }
+      if (!disposed) {
+        reconnectTimer = window.setTimeout(() => {
+          void connect();
+        }, 4500);
+      }
+    };
+
+    void connect();
+    return () => {
+      disposed = true;
+      controller.abort();
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+    };
+  }, [auth?.authenticated, isOfflineMode, loadGroups, loadSessionMessages, refreshSessions]);
 
   const handleNotebookSwitch = async (nbId: string) => {
     setActiveNbId(nbId);
@@ -397,8 +590,11 @@ export function App() {
     await refreshSessions(activeNbId);
   };
 
-  const handleToggleShareSession = async (sid: string, nextShared: boolean) => {
-    await api.updateSession(sid, { is_shared: nextShared });
+  const handleSetSessionScope = async (
+    sid: string,
+    scope: { is_shared: boolean; group_id: string }
+  ) => {
+    await api.updateSession(sid, { is_shared: scope.is_shared, group_id: scope.group_id });
     await refreshSessions(activeNbId);
   };
 
@@ -410,12 +606,88 @@ export function App() {
     await refreshSessions(activeNbId);
   };
 
+  const { pinnedDocs, loadedDocs, allShelfDocs } = useMemo(
+    () => resolveShelfDocuments(documents, shelf),
+    [documents, shelf]
+  );
+  const shelfDocIds = useMemo(() => new Set(allShelfDocs.map((d) => d.id)), [allShelfDocs]);
+  const userPinnedIds = useMemo(() => new Set(shelf.pinnedIds), [shelf.pinnedIds]);
+
+  const updateShelf = useCallback(
+    (updater: (prev: ShelfState) => ShelfState) => {
+      setShelf((prev) => {
+        const next = updater(prev);
+        saveShelfState(activeNbId, next);
+        return next;
+      });
+    },
+    [activeNbId]
+  );
+
+  const handleToggleUserPin = (docId: string) => {
+    const currentlyPinned = shelf.pinnedIds.includes(docId);
+    updateShelf((prev) => ({
+      pinnedIds: currentlyPinned
+        ? prev.pinnedIds.filter((id) => id !== docId)
+        : [...prev.pinnedIds, docId],
+      loadedIds: currentlyPinned ? prev.loadedIds : prev.loadedIds.filter((id) => id !== docId),
+      unloadedIds: prev.unloadedIds.filter((id) => id !== docId),
+    }));
+    if (!currentlyPinned) {
+      setSelectedDocIds((prev) => (prev.includes(docId) ? prev : [...prev, docId]));
+    }
+  };
+
+  const handleUnloadFromShelf = (docId: string) => {
+    updateShelf((prev) => ({
+      pinnedIds: prev.pinnedIds.filter((id) => id !== docId),
+      loadedIds: prev.loadedIds.filter((id) => id !== docId),
+      unloadedIds: prev.unloadedIds.includes(docId) ? prev.unloadedIds : [...prev.unloadedIds, docId],
+    }));
+    setSelectedDocIds((prev) => prev.filter((id) => id !== docId));
+  };
+
+  const handleToggleShelfLoad = (docId: string) => {
+    if (shelfDocIds.has(docId)) {
+      handleUnloadFromShelf(docId);
+    } else {
+      updateShelf((prev) => ({
+        pinnedIds: prev.pinnedIds,
+        loadedIds: prev.loadedIds.includes(docId) ? prev.loadedIds : [...prev.loadedIds, docId],
+        unloadedIds: prev.unloadedIds.filter((id) => id !== docId),
+      }));
+      setSelectedDocIds((prev) => (prev.includes(docId) ? prev : [...prev, docId]));
+    }
+  };
+
+  const handleBatchLoadToShelf = (docIds: string[], replaceLoaded = false) => {
+    const unique = Array.from(new Set(docIds));
+    updateShelf((prev) => {
+      const baseLoaded = replaceLoaded ? [] : prev.loadedIds;
+      const merged = Array.from(new Set([...baseLoaded, ...unique])).filter(
+        (id) => !prev.pinnedIds.includes(id)
+      );
+      const nextUnloaded = replaceLoaded
+        ? documents
+            .map((d) => d.id)
+            .filter((id) => !unique.includes(id) && !prev.pinnedIds.includes(id))
+        : prev.unloadedIds.filter((id) => !unique.includes(id));
+      return {
+        pinnedIds: prev.pinnedIds,
+        loadedIds: merged,
+        unloadedIds: nextUnloaded,
+      };
+    });
+    setSelectedDocIds((prev) => Array.from(new Set([...prev, ...unique])));
+    flashGlobalNotice(`${unique.length}건의 자료를 왼쪽 작업대에 불러왔습니다.`);
+  };
+
   const handleToggleDoc = (docId: string) => {
     setSelectedDocIds((prev) => (prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]));
   };
 
   const handleSelectAllDocs = (all: boolean) => {
-    setSelectedDocIds(all ? documents.filter((d) => d.status === 'ready').map((d) => d.id) : []);
+    setSelectedDocIds(all ? allShelfDocs.filter((d) => d.status === 'ready').map((d) => d.id) : []);
   };
 
   const handleSend = async (query: string) => {
@@ -429,6 +701,7 @@ export function App() {
       mode: effMode,
       citations: [],
       forms: [],
+      author_label: auth?.label || '',
     };
     const aiMsgId = `a_${Date.now() + 1}`;
     const aiPlaceholder: ChatMessage = {
@@ -609,12 +882,13 @@ export function App() {
 
   const isAdmin = auth.role === 'admin' && !isOfflineMode;
   const activeNotebook = notebooks.find((n) => n.id === activeNbId) || null;
+  const activeSession = sessions.find((s) => s.id === sessionId) || null;
   const showIosInstallBanner = isIOS() && !isStandalonePWA() && !dismissIosBanner;
 
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden bg-white">
       {/* Bespoke Editorial Window Toolbar (48px) */}
-      <header className="safe-top flex min-h-[48px] shrink-0 items-center justify-between gap-2 border-b border-black/[0.075] bg-white/95 px-3 py-1 backdrop-blur-xl sm:px-4">
+      <header className="safe-top relative z-30 flex min-h-[48px] shrink-0 items-center justify-between gap-2 border-b border-black/[0.075] bg-white/95 px-3 py-1 backdrop-blur-xl sm:px-4">
         {/* Left: Sidebar Toggle + Minimal Brand + Workspace Switcher + Notebook */}
         <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2">
           {workspace === 'qa' && (
@@ -680,33 +954,41 @@ export function App() {
           )}
         </div>
 
-        {/* Center (Desktop): Refined 4-Mode Segmented Control (Q&A mode only) */}
+        {/* Center (Desktop): Refined 4-Mode Segmented Control with Hover Explanation Cards */}
         <div className="hidden items-center justify-center lg:flex">
           {workspace === 'qa' ? (
             <div className="inline-flex rounded-lg bg-[#f0f0ee] p-0.5">
-              {(
-                [
-                  { id: 'auto', label: '자율' },
-                  { id: 'practical', label: '실무 정리' },
-                  { id: 'strict', label: '원문 엄격' },
-                  { id: 'advisory', label: '적용·제안' },
-                ] as const
-              ).map((opt) => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => {
-                    setMode(opt.id);
-                    setInstantMode(false);
-                  }}
-                  className={`chip-nowrap rounded-[6px] px-2.5 py-1 text-[11.5px] font-semibold transition ${
-                    mode === opt.id && !instantMode
-                      ? 'bg-white text-[#18181b] shadow-[0_1px_2px_rgba(0,0,0,0.07)]'
-                      : 'text-[#71717a] hover:text-[#18181b]'
-                  }`}
-                >
-                  {opt.label}
-                </button>
+              {ANSWER_MODES.map((opt) => (
+                <div key={opt.id} className="group/mode relative">
+                  <button
+                    type="button"
+                    title={`${opt.label} — ${opt.desc}`}
+                    onClick={() => {
+                      setMode(opt.id);
+                      setInstantMode(false);
+                    }}
+                    className={`chip-nowrap rounded-[6px] px-2.5 py-1 text-[11.5px] font-semibold transition ${
+                      mode === opt.id && !instantMode
+                        ? 'bg-white text-[#18181b] shadow-[0_1px_2px_rgba(0,0,0,0.07)]'
+                        : 'text-[#71717a] hover:text-[#18181b]'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                  {/* Hover Popover Card explaining each mode's specialty */}
+                  <div
+                    role="tooltip"
+                    className="pointer-events-none invisible absolute top-full left-1/2 z-50 mt-2 w-64 -translate-x-1/2 rounded-xl border border-black/[0.09] bg-white p-3 text-left opacity-0 shadow-[0_10px_28px_rgba(0,0,0,0.12)] transition duration-150 group-hover/mode:visible group-hover/mode:opacity-100 group-focus-within/mode:visible group-focus-within/mode:opacity-100"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12px] font-semibold text-[#18181b]">{opt.label}</span>
+                      <span className="chip-nowrap rounded bg-[#0f4c81]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                        {opt.badge}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-[11.5px] leading-relaxed text-[#52525b]">{opt.desc}</p>
+                  </div>
+                </div>
               ))}
             </div>
           ) : (
@@ -754,6 +1036,40 @@ export function App() {
             >
               <Server className="h-4 w-4" />
             </button>
+          )}
+
+          {!isOfflineMode && (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowCommandPalette(true)}
+                title="전체 빠른 검색 (Ctrl+K)"
+                aria-label="전체 빠른 검색"
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+              >
+                <Search className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">검색</span>
+                <kbd className="hidden rounded border border-black/[0.1] bg-[#f7f7f5] px-1 text-[10px] text-[#8a8a8e] xl:inline">
+                  Ctrl K
+                </kbd>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowGroupsModal(true)}
+                title="협업 그룹 · 초대 · 개설 권한 · 기기 간 복구"
+                aria-label="그룹 관리"
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+              >
+                <Users className="h-3.5 w-3.5" />
+                <span className="hidden md:inline">그룹</span>
+                {groups.length > 0 && (
+                  <span className="rounded-full bg-[#0f4c81]/12 px-1.5 py-0.2 text-[10px] font-bold text-[#0f4c81]">
+                    {groups.length}
+                  </span>
+                )}
+              </button>
+            </>
           )}
 
           <button
@@ -862,6 +1178,20 @@ export function App() {
         </div>
       )}
 
+      {globalNotice && (
+        <div className="flex items-center justify-between gap-2 border-b border-[#0f4c81]/20 bg-[#0f4c81]/[0.06] px-4 py-1.5 text-xs font-medium text-[#0f4c81]">
+          <span className="truncate">{globalNotice}</span>
+          <button
+            type="button"
+            onClick={() => setGlobalNotice('')}
+            aria-label="알림 닫기"
+            className="shrink-0 rounded p-0.5 hover:bg-black/[0.06]"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Main Workspace: Either Q&A 3-Surface Studio OR Administrative Standardization Studio */}
       {workspace === 'std' ? (
         <StandardizationWorkspace
@@ -869,6 +1199,10 @@ export function App() {
           currentOwnerId={auth.owner_id || ''}
           qaDocuments={documents}
           activeNotebookId={activeNbId}
+          groups={groups}
+          refreshTick={stdRefreshTick}
+          initialBoardId={stdInitialBoardId}
+          onOpenGroups={() => setShowGroupsModal(true)}
           onQaDocumentsUpdated={() => void loadNotebooks(activeNbId, false)}
         />
       ) : (
@@ -886,19 +1220,27 @@ export function App() {
         >
           <SourcesPanel
             notebookId={activeNbId}
-            documents={documents}
+            allDocumentCount={documents.length}
+            pinnedDocs={pinnedDocs}
+            loadedDocs={loadedDocs}
+            userPinnedIds={userPinnedIds}
             selectedDocIds={selectedDocIds}
             sessions={sessions}
+            groups={groups}
             activeSessionId={sessionId}
             currentOwnerId={auth.owner_id || ''}
             isAdmin={isAdmin}
             onToggleDoc={handleToggleDoc}
             onSelectAll={handleSelectAllDocs}
+            onToggleUserPin={handleToggleUserPin}
+            onUnloadFromShelf={handleUnloadFromShelf}
+            onOpenLibrary={() => setShowLibraryModal(true)}
+            onOpenGroups={() => setShowGroupsModal(true)}
             onOpenViewer={(docId, pageNo) => setViewerTarget({ docId, pageNo })}
             onSelectSession={(sid) => void loadSessionMessages(sid, activeNbId)}
             onNewChat={handleNewChat}
             onRenameSession={handleRenameSession}
-            onToggleShareSession={handleToggleShareSession}
+            onSetSessionScope={handleSetSessionScope}
             onDeleteSession={handleDeleteSession}
             onRefresh={() => void loadNotebooks(activeNbId, false)}
           />
@@ -911,12 +1253,13 @@ export function App() {
         >
           <ChatPanel
             notebook={activeNotebook}
+            activeSession={activeSession}
             messages={messages}
             mode={mode}
             instantMode={instantMode || isOfflineMode}
             doubleVerify={doubleVerify}
             selectedDocCount={selectedDocIds.length}
-            totalDocCount={documents.length}
+            totalDocCount={allShelfDocs.length}
             busy={busy}
             onModeChange={(m) => {
               setMode(m);
@@ -927,7 +1270,9 @@ export function App() {
             }}
             onDoubleVerifyToggle={setDoubleVerify}
             onSend={(q) => void handleSend(q)}
-            onOpenViewer={(docId, pageNo) => setViewerTarget({ docId, pageNo })}
+            onOpenViewer={(docId, pageNo, highlightText) =>
+              setViewerTarget({ docId, pageNo, highlightText })
+            }
             onOpenAutofill={(form) => setAutofillTarget(form)}
           />
         </section>
@@ -1000,9 +1345,86 @@ export function App() {
         <PageViewerModal
           docId={viewerTarget.docId}
           initialPage={viewerTarget.pageNo}
+          highlightText={viewerTarget.highlightText}
           offlineBundle={offlineBundle}
           isOfflineMode={isOfflineMode}
           onClose={() => setViewerTarget(null)}
+        />
+      )}
+
+      {showLibraryModal && (
+        <LibraryModal
+          notebookId={activeNbId}
+          documents={documents}
+          shelf={shelf}
+          shelfDocIds={shelfDocIds}
+          isAdmin={isAdmin}
+          onToggleUserPin={handleToggleUserPin}
+          onToggleShelfLoad={handleToggleShelfLoad}
+          onBatchLoadToShelf={handleBatchLoadToShelf}
+          onOpenViewer={(docId, pageNo) => setViewerTarget({ docId, pageNo })}
+          onRefresh={() => void loadNotebooks(activeNbId, false)}
+          onClose={() => setShowLibraryModal(false)}
+        />
+      )}
+
+      {showGroupsModal && (
+        <GroupsModal
+          isAdmin={isAdmin}
+          currentOwnerId={auth.owner_id || ''}
+          onGroupsChanged={() => {
+            void loadGroups();
+            void refreshSessions(activeNbId);
+            setStdRefreshTick((t) => t + 1);
+          }}
+          onIdentityRecovered={() => {
+            void checkAuth();
+            void loadGroups();
+            void refreshSessions(activeNbId);
+            setStdRefreshTick((t) => t + 1);
+          }}
+          onClose={() => setShowGroupsModal(false)}
+        />
+      )}
+
+      {showCommandPalette && (
+        <CommandPaletteModal
+          notebookId={activeNbId}
+          onSelectDocument={(doc) => {
+            if (!shelfDocIds.has(doc.id)) {
+              handleToggleShelfLoad(doc.id);
+            } else if (!selectedDocIds.includes(doc.id)) {
+              setSelectedDocIds((prev) => [...prev, doc.id]);
+            }
+            setWorkspace('qa');
+            setViewerTarget({ docId: doc.id, pageNo: 1 });
+          }}
+          onSelectForm={(form) => {
+            setWorkspace('qa');
+            setAutofillTarget(form);
+          }}
+          onSelectSession={(sess) => {
+            setWorkspace('qa');
+            void loadSessionMessages(sess.id, activeNbId);
+          }}
+          onSelectBoard={(board) => {
+            setStdInitialBoardId(board.id);
+            setWorkspace('std');
+          }}
+          onQuickAction={(action) => {
+            if (action === 'new_chat') {
+              setWorkspace('qa');
+              handleNewChat();
+            } else if (action === 'library') {
+              setWorkspace('qa');
+              setShowLibraryModal(true);
+            } else if (action === 'groups') {
+              setShowGroupsModal(true);
+            } else if (action === 'std') {
+              setWorkspace('std');
+            }
+          }}
+          onClose={() => setShowCommandPalette(false)}
         />
       )}
 
