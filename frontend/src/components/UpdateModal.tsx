@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import type { UpdateCheckResponse, UpdateProgress } from '../types';
+import { MarkdownView } from './MarkdownView';
 
 interface Props {
   info: UpdateCheckResponse;
@@ -171,8 +172,8 @@ export const UpdateModal: React.FC<Props> = ({ info, isAdmin, onSkipped, onClose
                 </a>
               )}
             </div>
-            <div className="max-h-60 overflow-y-auto rounded-xl border border-black/[0.08] bg-[#fafaf9] p-3.5 text-xs leading-relaxed whitespace-pre-wrap text-[#27272a]">
-              {latest.notes_md}
+            <div className="max-h-60 overflow-y-auto rounded-xl border border-black/[0.08] bg-[#fafaf9] p-3.5 text-xs leading-relaxed text-[#27272a]">
+              <MarkdownView content={latest.notes_md} />
             </div>
           </div>
 

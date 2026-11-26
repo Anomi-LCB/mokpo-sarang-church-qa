@@ -54,6 +54,7 @@ import type {
   UpdateCheckResponse,
 } from '../types';
 import { AdminPinConfirmModal } from './AdminPinConfirmModal';
+import { MarkdownView } from './MarkdownView';
 
 export type AdminTab = 'connect' | 'profile' | 'cli' | 'updates' | 'security' | 'notebooks' | 'feedback';
 
@@ -647,7 +648,7 @@ export const AdminModal: React.FC<Props> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-3 backdrop-blur-xs sm:p-6">
-      <div className="flex max-h-[92dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl">
+      <div className="flex max-h-[92dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl">
         <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fbfbfd] px-4 py-3">
           <h3 className="text-sm font-semibold text-[#1d1d1f]">환경 설정 · 모바일 연결 · 보안 관리</h3>
           <button
@@ -1806,8 +1807,8 @@ export const AdminModal: React.FC<Props> = ({
                     )}
                   </div>
 
-                  <div className="max-h-48 overflow-y-auto rounded-lg border border-black/[0.07] bg-[#fafaf9] p-3 text-xs leading-relaxed whitespace-pre-wrap text-[#27272a]">
-                    {updateInfo.latest.notes_md}
+                  <div className="max-h-52 overflow-y-auto rounded-lg border border-black/[0.07] bg-[#fafaf9] p-3.5 text-xs leading-relaxed text-[#27272a]">
+                    <MarkdownView content={updateInfo.latest.notes_md} />
                   </div>
 
                   {/* Progress Indicator */}
