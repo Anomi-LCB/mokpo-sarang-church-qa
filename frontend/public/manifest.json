@@ -1,0 +1,24 @@
+{
+  "name": "목포사랑의교회 행정Q&A",
+  "short_name": "목포사랑 행정Q&A",
+  "description": "목포사랑의교회 헌법·정관·시행세칙·해설서 근거 전용 행정 Q&A 및 서식 자동 작성기",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f5",
+  "theme_color": "#18181b",
+  "lang": "ko",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+# Python & Virtual Environment
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.spec
+
+# Node & Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Local runtime data, church private documents, DBs, keys & secrets (NEVER commit!)
+data/
+dist/
+build/
+*.db
+*.sqlite
+*.sqlite3
+*.pdf
+*.zip
+*.exe
+*.msi
+*.apk
+*.idsig
+*.keystore
+*.jks
+*.key
+*.pem
+.env
+.env.*
+*.log
+
+# Android build outputs & bundled offline church corpus
+android/build/
+
+# Offline third-party redistributables (downloaded during local installer build)
+packaging/windows/redist/
