@@ -52,6 +52,7 @@ export interface Citation {
   page_end: number;
   excerpt: string;
   score: number;
+  via_xref?: string;
 }
 
 export interface VerificationResult {
@@ -59,8 +60,54 @@ export interface VerificationResult {
   verified_count: number;
   unverified_refs?: string[];
   checked_refs?: string[];
+  unverified_numbers?: string[];
+  hierarchy_notes?: string[];
   summary: string;
   double_verified?: boolean;
+  cache_hit?: boolean;
+}
+
+export interface RetrievalEngineMeta {
+  elapsed_ms?: number;
+  used_neural_dense?: boolean;
+  used_reranker?: boolean;
+  xref_hops?: number;
+  followup_rewritten?: boolean;
+  effective_query?: string;
+}
+
+export interface EngineStatus {
+  version: string;
+  kiwi_active: boolean;
+  stats: {
+    documents: number;
+    chunks: number;
+    parent_articles: number;
+    cross_refs: number;
+    structured_tables: number;
+    forms: number;
+  };
+  cache: {
+    entries: number;
+    hits: number;
+    misses: number;
+  };
+  neural: {
+    embed_installed: boolean;
+    rerank_installed: boolean;
+    active: boolean;
+    embed_model: string;
+    rerank_model: string;
+    disk_mb: number;
+    embedded_chunks: number;
+    total_chunks: number;
+    install_state: {
+      status: 'idle' | 'downloading' | 'indexing' | 'ready' | 'error';
+      progress: number;
+      message: string;
+      error: string;
+    };
+  };
 }
 
 export interface FormItem {
@@ -105,6 +152,7 @@ export interface ChatMessage {
   hasEvidence?: boolean;
   streaming?: boolean;
   statusText?: string;
+  engineMeta?: RetrievalEngineMeta;
 }
 
 export type AiConnectionMode = 'auto' | 'cli' | 'api';

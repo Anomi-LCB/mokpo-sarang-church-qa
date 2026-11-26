@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from core.config import (
     get_db_path,
     resolve_stored_path,
 )
+from core.korean_nlp import build_search_tokens_v4, extract_legal_references
 
 
 def now_iso() -> str:
@@ -32,27 +34,8 @@ _WORD_RE = re.compile(r"[가-힣A-Za-z0-9]+")
 
 
 def build_search_tokens(text: str) -> str:
-    """Create hybrid Korean word + stem + character bigram tokens for FTS5."""
-    if not text:
-        return ""
-    tokens: list[str] = []
-    seen_bigrams: set[str] = set()
-    for raw in _WORD_RE.findall(text):
-        w = raw.lower()
-        tokens.append(w)
-        if len(w) >= 3 and any("\uac00" <= ch <= "\ud7a3" for ch in w):
-            stem = _KOR_PARTICLES.sub("", w)
-            if stem and stem != w and len(stem) >= 2:
-                tokens.append(stem)
-        # Add Korean character bigrams for compound-word & OCR-typo resilience
-        kor_only = "".join(ch for ch in w if "\uac00" <= ch <= "\ud7a3")
-        if len(kor_only) >= 2:
-            for i in range(len(kor_only) - 1):
-                bg = "bg_" + kor_only[i : i + 2]
-                if bg not in seen_bigrams:
-                    seen_bigrams.add(bg)
-                    tokens.append(bg)
-    return " ".join(tokens)
+    """Create hybrid Korean Kiwi morpheme + compound + stem + character bigram tokens for FTS5."""
+    return build_search_tokens_v4(text)
 
 
 SCHEMA_SQL = """
@@ -111,8 +94,37 @@ CREATE TABLE IF NOT EXISTS chunks (
     content TEXT NOT NULL,
     search_tokens TEXT NOT NULL DEFAULT '',
     char_len INTEGER NOT NULL DEFAULT 0,
+    parent_key TEXT NOT NULL DEFAULT '',
+    context_header TEXT NOT NULL DEFAULT '',
+    parent_content TEXT NOT NULL DEFAULT '',
+    chunk_type TEXT NOT NULL DEFAULT 'clause',
     FOREIGN KEY (doc_id) REFERENCES documents(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS chunk_refs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_chunk_id INTEGER NOT NULL,
+    doc_id TEXT NOT NULL,
+    notebook_id TEXT NOT NULL,
+    ref_type TEXT NOT NULL DEFAULT 'article',
+    ref_target TEXT NOT NULL,
+    target_doc_hint TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (source_chunk_id) REFERENCES chunks(id) ON DELETE CASCADE,
+    FOREIGN KEY (doc_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_refs_target ON chunk_refs(notebook_id, ref_target);
+CREATE INDEX IF NOT EXISTS idx_chunk_refs_source ON chunk_refs(source_chunk_id);
+
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    chunk_id INTEGER PRIMARY KEY,
+    model_id TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vec BLOB NOT NULL,
+    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_model ON chunk_embeddings(model_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     content,
@@ -243,28 +255,63 @@ CREATE INDEX IF NOT EXISTS idx_group_members_owner ON collab_group_members(owner
 
 class Database:
     def __init__(self, db_path: Path | None = None):
-        self.db_path = db_path or get_db_path()
+        self.db_path = Path(db_path) if db_path else get_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()
+        self._pool_lock = threading.Lock()
+        self._all_conns: set[sqlite3.Connection] = set()
         self._init_schema()
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def _open_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA temp_store = MEMORY;")
         conn.execute("PRAGMA cache_size = -32000;")
         conn.execute("PRAGMA mmap_size = 134217728;")
         conn.execute("PRAGMA busy_timeout = 5000;")
+        return conn
+
+    def close_pooled_connections(self) -> None:
+        """Close all thread-local pooled SQLite handles cleanly (before backup restore or shutdown)."""
+        with self._pool_lock:
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if hasattr(self._local, "conn"):
+            self._local.conn = None
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+            except sqlite3.Error:
+                conn = None
+                self._local.conn = None
+        if conn is None:
+            conn = self._open_conn()
+            self._local.conn = conn
+            with self._pool_lock:
+                self._all_conns.add(conn)
         try:
             yield conn
-            conn.commit()
+            if conn.in_transaction:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except Exception:
+                pass
             raise
-        finally:
-            conn.close()
 
     def _init_schema(self) -> None:
         with self.connect() as conn:
@@ -291,6 +338,15 @@ class Database:
                 conn.execute("ALTER TABLE chat_messages ADD COLUMN author_label TEXT NOT NULL DEFAULT ''")
             if "author_owner_id" not in msg_cols:
                 conn.execute("ALTER TABLE chat_messages ADD COLUMN author_owner_id TEXT NOT NULL DEFAULT ''")
+            chunk_cols = {r["name"] for r in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+            if "parent_key" not in chunk_cols:
+                conn.execute("ALTER TABLE chunks ADD COLUMN parent_key TEXT NOT NULL DEFAULT ''")
+            if "context_header" not in chunk_cols:
+                conn.execute("ALTER TABLE chunks ADD COLUMN context_header TEXT NOT NULL DEFAULT ''")
+            if "parent_content" not in chunk_cols:
+                conn.execute("ALTER TABLE chunks ADD COLUMN parent_content TEXT NOT NULL DEFAULT ''")
+            if "chunk_type" not in chunk_cols:
+                conn.execute("ALTER TABLE chunks ADD COLUMN chunk_type TEXT NOT NULL DEFAULT 'clause'")
 
     def ensure_default_notebook(self) -> dict[str, Any]:
         nb = self.get_notebook(DEFAULT_NOTEBOOK_ID)
@@ -516,6 +572,7 @@ class Database:
     ) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM pages WHERE doc_id = ?", (doc_id,))
+            conn.execute("DELETE FROM chunk_refs WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
             conn.execute("DELETE FROM chunks_fts WHERE doc_id = ?", (doc_id,))
 
@@ -539,22 +596,37 @@ class Database:
             )
 
             for ch in chunks:
-                tok = build_search_tokens(f"{ch.get('heading', '')} {ch.get('section_path', '')} {ch['content']}")
+                ctx_hdr = ch.get("context_header", "") or ""
+                heading = ch.get("heading", "") or ""
+                sec_path = ch.get("section_path", "") or ""
+                content = ch["content"]
+                parent_key = ch.get("parent_key", "") or ""
+                parent_content = ch.get("parent_content", "") or ""
+                chunk_type = ch.get("chunk_type", "clause") or "clause"
+
+                tok = build_search_tokens(f"{ctx_hdr} {heading} {sec_path} {content}")
                 cur = conn.execute(
                     """
-                    INSERT INTO chunks(doc_id, notebook_id, page_start, page_end, heading, section_path, content, search_tokens, char_len)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO chunks(
+                        doc_id, notebook_id, page_start, page_end, heading, section_path,
+                        content, search_tokens, char_len, parent_key, context_header, parent_content, chunk_type
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         doc_id,
                         notebook_id,
                         ch["page_start"],
                         ch["page_end"],
-                        ch.get("heading", ""),
-                        ch.get("section_path", ""),
-                        ch["content"],
+                        heading,
+                        sec_path,
+                        content,
                         tok,
-                        len(ch["content"]),
+                        len(content),
+                        parent_key,
+                        ctx_hdr,
+                        parent_content,
+                        chunk_type,
                     ),
                 )
                 chunk_id = cur.lastrowid
@@ -564,14 +636,194 @@ class Database:
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ch["content"],
-                        f"{ch.get('heading', '')} {ch.get('section_path', '')}".strip(),
+                        f"{ctx_hdr}\n{content}".strip() if ctx_hdr else content,
+                        f"{heading} {sec_path}".strip(),
                         tok,
                         doc_id,
                         notebook_id,
                         chunk_id,
                     ),
                 )
+                # Populate Legal Cross-Reference Graph edges
+                self_art_m = re.search(r"제\s*\d+\s*조(?:\s*의\s*\d+)?", heading)
+                self_art = self_art_m.group(0) if self_art_m else ""
+                refs = extract_legal_references(content, self_article=self_art)
+                if refs:
+                    conn.executemany(
+                        """
+                        INSERT INTO chunk_refs(source_chunk_id, doc_id, notebook_id, ref_type, ref_target, target_doc_hint)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (chunk_id, doc_id, notebook_id, r["ref_type"], r["ref_target"], r["target_doc_hint"])
+                            for r in refs
+                        ],
+                    )
+
+    # ---- v4.0 Corpus Fingerprint, Legal Cross-References & Local Neural Embeddings ----
+    def get_corpus_fingerprint(self, notebook_id: str) -> str:
+        with self.connect() as conn:
+            d = conn.execute(
+                "SELECT COUNT(*) AS cnt, COALESCE(SUM(total_chars), 0) AS chars, COALESCE(MAX(created_at), '') AS mx "
+                "FROM documents WHERE notebook_id = ? AND status = 'ready'",
+                (notebook_id,),
+            ).fetchone()
+            c = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM chunks WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchone()
+            return f"{d['cnt']}:{d['chars']}:{c['cnt']}:{d['mx']}"
+
+    def get_chunk_refs_for_sources(self, chunk_ids: list[int]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        ph = ",".join("?" for _ in chunk_ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT source_chunk_id, doc_id, ref_type, ref_target, target_doc_hint "
+                f"FROM chunk_refs WHERE source_chunk_id IN ({ph})",
+                chunk_ids,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_chunks_by_ids(self, chunk_ids: list[int]) -> list[dict[str, Any]]:
+        if not chunk_ids:
+            return []
+        ph = ",".join("?" for _ in chunk_ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, doc_id, page_start, page_end, heading, section_path, content,
+                       parent_key, context_header, parent_content, chunk_type
+                FROM chunks WHERE id IN ({ph})
+                """,
+                chunk_ids,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_embedding_coverage(self, notebook_id: str, model_id: str) -> tuple[int, int]:
+        with self.connect() as conn:
+            tot = conn.execute("SELECT COUNT(*) FROM chunks WHERE notebook_id = ?", (notebook_id,)).fetchone()[0]
+            emb = conn.execute(
+                """
+                SELECT COUNT(*) FROM chunk_embeddings e
+                JOIN chunks c ON c.id = e.chunk_id
+                WHERE c.notebook_id = ? AND e.model_id = ?
+                """,
+                (notebook_id, model_id),
+            ).fetchone()[0]
+            return int(emb), int(tot)
+
+    def get_embeddings_fingerprint(self, notebook_id: str, model_id: str) -> str:
+        with self.connect() as conn:
+            r = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt, COALESCE(MAX(e.chunk_id), 0) AS mx
+                FROM chunk_embeddings e
+                JOIN chunks c ON c.id = e.chunk_id
+                WHERE c.notebook_id = ? AND e.model_id = ?
+                """,
+                (notebook_id, model_id),
+            ).fetchone()
+            return f"{r['cnt']}:{r['mx']}"
+
+    def load_notebook_embeddings(self, notebook_id: str, model_id: str) -> list[tuple[int, bytes]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT e.chunk_id, e.vec
+                FROM chunk_embeddings e
+                JOIN chunks c ON c.id = e.chunk_id
+                WHERE c.notebook_id = ? AND e.model_id = ?
+                ORDER BY e.chunk_id ASC
+                """,
+                (notebook_id, model_id),
+            ).fetchall()
+            return [(int(r[0]), bytes(r[1])) for r in rows]
+
+    def get_chunk_ids_for_docs(self, notebook_id: str, doc_ids: list[str]) -> set[int]:
+        if not doc_ids:
+            return set()
+        ph = ",".join("?" for _ in doc_ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT id FROM chunks WHERE notebook_id = ? AND doc_id IN ({ph})",
+                [notebook_id, *doc_ids],
+            ).fetchall()
+            return {int(r[0]) for r in rows}
+
+    def list_chunks_missing_embeddings(self, notebook_id: str, model_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.id, c.context_header, c.heading, c.content
+                FROM chunks c
+                LEFT JOIN chunk_embeddings e ON e.chunk_id = c.id AND e.model_id = ?
+                WHERE c.notebook_id = ? AND e.chunk_id IS NULL
+                ORDER BY c.id ASC
+                """,
+                (model_id, notebook_id),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def upsert_chunk_embeddings(self, rows: list[tuple[int, str, int, bytes]]) -> None:
+        if not rows:
+            return
+        with self.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO chunk_embeddings(chunk_id, model_id, dim, vec)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    model_id = excluded.model_id,
+                    dim = excluded.dim,
+                    vec = excluded.vec
+                """,
+                rows,
+            )
+
+    def clear_embeddings(self) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM chunk_embeddings")
+
+    def get_engine_stats(self, notebook_id: str) -> dict[str, int]:
+        with self.connect() as conn:
+            docs = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM documents WHERE notebook_id = ? AND status = 'ready'",
+                    (notebook_id,),
+                ).fetchone()[0]
+            )
+            chunks = int(
+                conn.execute("SELECT COUNT(*) FROM chunks WHERE notebook_id = ?", (notebook_id,)).fetchone()[0]
+            )
+            parents = int(
+                conn.execute(
+                    "SELECT COUNT(DISTINCT doc_id || ':' || parent_key) FROM chunks "
+                    "WHERE notebook_id = ? AND parent_key != ''",
+                    (notebook_id,),
+                ).fetchone()[0]
+            )
+            xrefs = int(
+                conn.execute("SELECT COUNT(*) FROM chunk_refs WHERE notebook_id = ?", (notebook_id,)).fetchone()[0]
+            )
+            tables = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chunks WHERE notebook_id = ? AND chunk_type = 'table'",
+                    (notebook_id,),
+                ).fetchone()[0]
+            )
+            forms = int(
+                conn.execute("SELECT COUNT(*) FROM forms_catalog WHERE notebook_id = ?", (notebook_id,)).fetchone()[0]
+            )
+            return {
+                "documents": docs,
+                "chunks": chunks,
+                "parent_articles": parents,
+                "cross_refs": xrefs,
+                "structured_tables": tables,
+                "forms": forms,
+            }
 
     def get_page_text(self, doc_id: str, page_no: int) -> dict[str, Any] | None:
         with self.connect() as conn:

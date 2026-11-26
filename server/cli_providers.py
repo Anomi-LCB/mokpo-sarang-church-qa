@@ -14,7 +14,28 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 import httpx
 
 from core.retriever import RetrievalResult
+from core.verifier import detect_hierarchy_notes
 from server.ai_secrets import decrypt_secret, encrypt_secret, mask_secret
+
+_SHARED_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_shared_http_client() -> httpx.AsyncClient:
+    """Return a persistent pooled HTTP/1.1+2 AsyncClient to eliminate TLS handshake overhead."""
+    global _SHARED_HTTP_CLIENT
+    if _SHARED_HTTP_CLIENT is None or _SHARED_HTTP_CLIENT.is_closed:
+        _SHARED_HTTP_CLIENT = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=60.0),
+            timeout=httpx.Timeout(connect=15.0, read=150.0, write=30.0, pool=15.0),
+        )
+    return _SHARED_HTTP_CLIENT
+
+
+async def close_shared_http_client() -> None:
+    global _SHARED_HTTP_CLIENT
+    if _SHARED_HTTP_CLIENT is not None and not _SHARED_HTTP_CLIENT.is_closed:
+        await _SHARED_HTTP_CLIENT.aclose()
+    _SHARED_HTTP_CLIENT = None
 
 NO_EVIDENCE_MESSAGE = (
     "제공된 자료에서 해당 정보를 찾을 수 없습니다.\n\n"
@@ -340,8 +361,14 @@ def build_grounded_prompt(
     for idx, ch in enumerate(retrieval.chunks, start=1):
         loc = f"p.{ch['page_start']}" if ch["page_start"] == ch["page_end"] else f"p.{ch['page_start']}~{ch['page_end']}"
         sec = " / ".join(x for x in (ch.get("section_path", ""), ch.get("heading", "")) if x)
-        header = f"[근거 {idx}] 문서: {ch['doc_title']} | 위치: {sec or '본문'} ({loc})"
+        xref_tag = f" | {ch['via_xref']}" if ch.get("via_xref") else ""
+        header = f"[근거 {idx}] 문서: {ch['doc_title']} | 위치: {sec or '본문'} ({loc}){xref_tag}"
         evidence_blocks.append(f"{header}\n{ch['content']}")
+
+    hierarchy_notes = detect_hierarchy_notes(retrieval)
+    hierarchy_block = ""
+    if hierarchy_notes:
+        hierarchy_block = "\n[법규 위계 및 충돌 주의]\n" + "\n".join(f"- {n}" for n in hierarchy_notes) + "\n"
 
     forms_block = ""
     if retrieval.forms:
@@ -373,7 +400,7 @@ def build_grounded_prompt(
 
 [검색 대상 문서]
 {searched_list}
-{history_block}
+{hierarchy_block}{history_block}
 <retrieved_evidence>
 {"\n\n---\n\n".join(evidence_blocks)}
 </retrieved_evidence>
@@ -450,9 +477,10 @@ async def stream_api_response(
     pname = str(meta["name"])
 
     timeout = httpx.Timeout(connect=15.0, read=float(timeout_sec), write=30.0, pool=15.0)
+    client = _get_shared_http_client()
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        if True:
             if provider_id == "anthropic":
                 endpoint = use_base if use_base.endswith("/v1/messages") else f"{use_base}/v1/messages"
                 headers = {
@@ -460,13 +488,31 @@ async def stream_api_response(
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 }
-                payload = {
-                    "model": use_model,
-                    "max_tokens": max_tokens,
-                    "stream": True,
-                    "messages": [{"role": "user", "content": prompt}],
-                }
-                async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
+                # Enable Anthropic Prompt Caching on grounded rules + evidence blocks when present
+                q_marker = "<user_question>"
+                if q_marker in prompt and len(prompt) >= 1800:
+                    sys_part, user_part = prompt.split(q_marker, 1)
+                    payload: dict[str, Any] = {
+                        "model": use_model,
+                        "max_tokens": max_tokens,
+                        "stream": True,
+                        "system": [
+                            {
+                                "type": "text",
+                                "text": sys_part.strip(),
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                        "messages": [{"role": "user", "content": q_marker + user_part}],
+                    }
+                else:
+                    payload = {
+                        "model": use_model,
+                        "max_tokens": max_tokens,
+                        "stream": True,
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                async with client.stream("POST", endpoint, headers=headers, json=payload, timeout=timeout) as resp:
                     if resp.status_code >= 400:
                         body = (await resp.aread()).decode("utf-8", errors="replace")
                         raise RuntimeError(_format_http_api_error(pname, resp.status_code, body))
@@ -504,7 +550,7 @@ async def stream_api_response(
                     "stream": True,
                     "messages": [{"role": "user", "content": prompt}],
                 }
-                async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
+                async with client.stream("POST", endpoint, headers=headers, json=payload, timeout=timeout) as resp:
                     if resp.status_code >= 400:
                         body = (await resp.aread()).decode("utf-8", errors="replace")
                         raise RuntimeError(_format_http_api_error(pname, resp.status_code, body))
@@ -548,7 +594,7 @@ async def stream_api_response(
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 }
                 async with client.stream(
-                    "POST", endpoint, params={"alt": "sse"}, headers=headers, json=payload
+                    "POST", endpoint, params={"alt": "sse"}, headers=headers, json=payload, timeout=timeout
                 ) as resp:
                     if resp.status_code >= 400:
                         body = (await resp.aread()).decode("utf-8", errors="replace")

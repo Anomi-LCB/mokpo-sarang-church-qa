@@ -15,7 +15,9 @@ import {
   FileEdit,
   FileSpreadsheet,
   FileText,
+  Link2,
   Loader2,
+  Scale,
   ShieldCheck,
   Users,
   Zap,
@@ -340,12 +342,82 @@ export const ChatPanel: React.FC<Props> = memo(({
                         <MarkdownView content={msg.content} />
                       ) : (
                         msg.streaming && (
-                          <div className="flex items-center gap-2 py-1 text-xs text-[#8a8a8e]">
-                            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#0f4c81]" />
-                            <span>근거 자료를 정리하고 있습니다...</span>
+                          <div className="space-y-2.5">
+                            {msg.citations.length > 0 ? (
+                              <div className="rounded-xl border border-black/[0.07] bg-[#fafaf9] p-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-[#18181b]">
+                                    <BookOpen className="h-3.5 w-3.5 text-[#0f4c81]" />
+                                    <span>
+                                      원문 근거 {msg.citations.length}건 즉시 확보
+                                      {typeof msg.engineMeta?.elapsed_ms === 'number'
+                                        ? ` (${Math.round(msg.engineMeta.elapsed_ms)}ms)`
+                                        : ''}
+                                    </span>
+                                  </div>
+                                  <span className="chip-nowrap text-[10.5px] text-[#71717a]">
+                                    AI 정밀 요약 생성 중...
+                                  </span>
+                                </div>
+                                <div className="mt-2 space-y-1.5">
+                                  {msg.citations.slice(0, 3).map((c, idx) => (
+                                    <div
+                                      key={`spec-${c.chunk_id}-${idx}`}
+                                      className="flex items-center justify-between gap-2 rounded-lg border border-black/[0.05] bg-white px-2.5 py-1.5"
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="truncate text-[11.5px] font-semibold text-[#18181b]">
+                                            {c.doc_title}
+                                          </span>
+                                          {c.via_xref && (
+                                            <span className="chip-nowrap inline-flex items-center gap-0.5 rounded bg-[#0f4c81]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#0f4c81]">
+                                              <Link2 className="h-2.5 w-2.5" />
+                                              <span>{c.via_xref}</span>
+                                            </span>
+                                          )}
+                                        </div>
+                                        {(c.section_path || c.heading) && (
+                                          <p className="truncate text-[10.5px] text-[#71717a]">
+                                            {[c.section_path, c.heading].filter(Boolean).join(' · ')}
+                                          </p>
+                                        )}
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={() => onOpenViewer(c.doc_id, c.page_start, c.excerpt)}
+                                        className="chip-nowrap inline-flex shrink-0 items-center gap-1 rounded-md bg-[#f7f7f5] px-2 py-0.5 text-[10.5px] font-medium text-[#0f4c81] hover:bg-[#ededeb]"
+                                      >
+                                        <Eye className="h-3 w-3" />
+                                        <span>p.{c.page_start}</span>
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2 py-1 text-xs text-[#8a8a8e]">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#0f4c81]" />
+                                <span>근거 자료를 정리하고 있습니다...</span>
+                              </div>
+                            )}
                           </div>
                         )
                       )}
+
+                      {/* Legal Hierarchy Notice when evidence spans Constitution / Bylaws / Rules */}
+                      {!msg.streaming &&
+                        msg.verification?.hierarchy_notes &&
+                        msg.verification.hierarchy_notes.length > 0 && (
+                          <div className="mt-3 flex items-start gap-2 rounded-lg border border-[#0f4c81]/15 bg-[#0f4c81]/[0.04] px-3 py-2 text-[11.5px] leading-relaxed text-[#3f3f46]">
+                            <Scale className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#0f4c81]" />
+                            <div className="min-w-0 flex-1 space-y-0.5">
+                              {msg.verification.hierarchy_notes.map((note, ni) => (
+                                <p key={ni}>{note}</p>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                       {/* Quiet Metadata & Hover Actions Strip */}
                       {!msg.streaming && msg.content && (
@@ -369,7 +441,11 @@ export const ChatPanel: React.FC<Props> = memo(({
 
                             {msg.verification && msg.verification.status !== 'no_evidence' && (
                               <span
-                                title={msg.verification.summary}
+                                title={
+                                  msg.verification.unverified_numbers && msg.verification.unverified_numbers.length > 0
+                                    ? `${msg.verification.summary} (미확인 수치: ${msg.verification.unverified_numbers.join(', ')})`
+                                    : msg.verification.summary
+                                }
                                 className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium ${
                                   msg.verification.status === 'verified'
                                     ? 'bg-emerald-50/90 text-emerald-800 ring-1 ring-emerald-200/70'
@@ -382,11 +458,13 @@ export const ChatPanel: React.FC<Props> = memo(({
                                   <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                                 )}
                                 <span>
-                                  {msg.verification.status === 'verified'
-                                    ? msg.verification.double_verified
-                                      ? '이중 검증됨'
-                                      : '근거 검증됨'
-                                    : '원문 확인 권장'}
+                                  {msg.verification.cache_hit
+                                    ? '즉시 캐시 검증'
+                                    : msg.verification.status === 'verified'
+                                      ? msg.verification.double_verified
+                                        ? '이중 검증됨'
+                                        : '근거 검증됨'
+                                      : '원문 확인 권장'}
                                 </span>
                               </span>
                             )}
@@ -443,7 +521,15 @@ export const ChatPanel: React.FC<Props> = memo(({
                           <div key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-black/[0.06] bg-white p-3">
                             <div className="flex items-center justify-between gap-2">
                               <div className="min-w-0 flex-1">
-                                <span className="text-xs font-semibold text-[#18181b]">{c.doc_title}</span>
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="text-xs font-semibold text-[#18181b]">{c.doc_title}</span>
+                                  {c.via_xref && (
+                                    <span className="chip-nowrap inline-flex items-center gap-0.5 rounded bg-[#0f4c81]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                                      <Link2 className="h-2.5 w-2.5" />
+                                      <span>{c.via_xref}</span>
+                                    </span>
+                                  )}
+                                </div>
                                 {(c.section_path || c.heading) && (
                                   <p className="truncate text-[11px] text-[#71717a]">
                                     {[c.section_path, c.heading].filter(Boolean).join(' · ')}

@@ -364,12 +364,24 @@ def main() -> None:
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
             dpage.wait_for_timeout(200)
 
-            # Open Settings -> AI Engine (CLI / API selector) & Updates tab audits
+            # Open Settings -> AI Engine (CLI / API selector + v4.0 Engine card) & Updates tab audits
             dpage.click('header button:has-text("설정")')
             dpage.wait_for_selector("text=화면 · AI 엔진", timeout=8000)
             dpage.click('div.fixed.inset-0.z-50 button:has-text("화면 · AI 엔진")')
             dpage.wait_for_selector("text=AI 연결 방식 선택", timeout=6000)
+            dpage.wait_for_selector("text=내부 검색 엔진 v4.0.0", timeout=6000)
+            dpage.wait_for_selector("text=Kiwi 한국어 형태소 활성", timeout=6000)
             dpage.wait_for_timeout(250)
+            eng_status = dpage.evaluate(
+                """async () => {
+                    const r = await fetch('/api/engine/status', { credentials: 'include' });
+                    return await r.json();
+                }"""
+            )
+            print(f"[AUDIT Engine-v4.0-EXE] {eng_status}", flush=True)
+            assert eng_status.get("version") == "4.0.0", f"Expected v4.0.0, got {eng_status}"
+            assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
+            assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_ai_engine.png"))
 

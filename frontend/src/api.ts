@@ -9,6 +9,7 @@ import type {
   CliSettings,
   CollabGroup,
   DocumentItem,
+  EngineStatus,
   FeedbackCategory,
   FeedbackInboxResponse,
   FeedbackItem,
@@ -497,6 +498,29 @@ export const api = {
     model?: string;
     base_url?: string;
   }) => reqJson<AiTestResult>('/api/admin/ai/test', { method: 'POST', body: JSON.stringify(payload) }),
+
+  // ---- Engine v4.0 Status, Local ONNX Neural Pack & Re-Index ----
+  getEngineStatus: (notebookId = 'mokpo-sarang-church') =>
+    reqJson<EngineStatus>(`/api/engine/status?notebook_id=${encodeURIComponent(notebookId)}`),
+  reindexEngineV4: (notebookId = 'mokpo-sarang-church') =>
+    reqJson<{ ok: boolean; job_id: string; status: string }>(
+      `/api/admin/engine/reindex?notebook_id=${encodeURIComponent(notebookId)}`,
+      { method: 'POST' }
+    ),
+  installNeuralPack: (notebookId = 'mokpo-sarang-church', includeReranker = true) =>
+    reqJson<{ ok: boolean; started?: boolean; already_running?: boolean; neural: EngineStatus['neural'] }>(
+      `/api/admin/engine/neural/install?notebook_id=${encodeURIComponent(notebookId)}&include_reranker=${includeReranker ? 'true' : 'false'}`,
+      { method: 'POST' }
+    ),
+  removeNeuralPack: (notebookId = 'mokpo-sarang-church') =>
+    reqJson<{ ok: boolean; neural: EngineStatus['neural'] }>(
+      `/api/admin/engine/neural?notebook_id=${encodeURIComponent(notebookId)}`,
+      { method: 'DELETE' }
+    ),
+  clearEngineCache: () =>
+    reqJson<{ ok: boolean; cache: EngineStatus['cache'] }>('/api/admin/engine/cache/clear', {
+      method: 'POST',
+    }),
 
   // ---- Opt-In Updates ----
   checkUpdates: (force = false) =>

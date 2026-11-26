@@ -30,9 +30,12 @@ from core.config import (
     get_exports_dir,
     get_resource_dir,
 )
+from core.answer_cache import TwoLayerAnswerCache
 from core.database import Database
 from core.forms import export_editable_docx, export_original_pdf, export_table_xlsx, render_pdf_page_png
-from core.ingest import SUPPORTED_EXTENSIONS, ingest_file, replace_document_file
+from core.ingest import SUPPORTED_EXTENSIONS, ingest_file, reindex_notebook_v4, replace_document_file
+from core.korean_nlp import is_kiwi_available
+from core.neural_engine import neural_engine
 from core.report import export_qa_report_docx
 from core.retriever import format_instant_search_answer, retrieve
 from core.verifier import build_double_verify_prompt, verify_citations
@@ -41,6 +44,7 @@ from server.backup import create_backup, ensure_daily_backup, get_backup_path, l
 from server.cli_providers import (
     NO_EVIDENCE_MESSAGE,
     build_grounded_prompt,
+    close_shared_http_client,
     detect_cli_providers,
     generate_autofill_structure,
     get_api_providers_status,
@@ -260,11 +264,14 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         app.state.discovery = discovery
         app.state.jobs = {}
         app.state.offline_bundle_cache = {}
+        app.state.answer_cache = TwoLayerAnswerCache()
         try:
             yield
         finally:
             discovery.stop()
             tunnel_mgr.stop_cloudflare_tunnel()
+            await close_shared_http_client()
+            db.close_pooled_connections()
 
     app = FastAPI(title=APP_NAME, lifespan=lifespan)
     app.include_router(std_router)
@@ -592,6 +599,11 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                         progress_cb=_cb,
                     )
                     all_docs.extend(ingested)
+                if neural_engine.is_embed_installed():
+                    job_state["message"] = "로컬 신경망 벡터 색인 갱신 중..."
+                    neural_engine.index_notebook_embeddings(db, notebook_id)
+                neural_engine.invalidate_cache(notebook_id)
+                request.app.state.answer_cache.clear()
                 job_state["documents"] = all_docs
                 job_state["progress"] = 100
                 job_state["status"] = "done"
@@ -698,6 +710,11 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                     priority=priority,
                     progress_cb=_cb,
                 )
+                if neural_engine.is_embed_installed():
+                    job_state["message"] = "로컬 신경망 벡터 색인 갱신 중..."
+                    neural_engine.index_notebook_embeddings(db, existing["notebook_id"])
+                neural_engine.invalidate_cache(existing["notebook_id"])
+                request.app.state.answer_cache.clear()
                 job_state["documents"] = [updated_doc]
                 job_state["progress"] = 100
                 job_state["status"] = "done"
@@ -726,6 +743,8 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
             raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
         create_backup(db.db_path, reason="pre_del_doc")
         db.delete_document(doc_id)
+        neural_engine.invalidate_cache(doc.get("notebook_id"))
+        request.app.state.answer_cache.clear()
         db.log_audit("doc_deleted", user.role, user.label, get_client_ip(request), f"문서 삭제: {doc['title']}")
         try:
             Path(doc["stored_path"]).unlink(missing_ok=True)
@@ -1122,6 +1141,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                     body.query,
                     body.doc_ids,
                     8,
+                    history,
                 )
 
                 citations = [
@@ -1136,6 +1156,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                         "page_end": c["page_end"],
                         "excerpt": c["content"][:550],
                         "score": c["score"],
+                        "via_xref": c.get("via_xref", ""),
                     }
                     for c in retrieval.chunks
                 ]
@@ -1162,6 +1183,14 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                         "citations": citations,
                         "forms": forms_payload,
                         "searched_docs": retrieval.searched_doc_titles,
+                        "engine": {
+                            "elapsed_ms": retrieval.elapsed_ms,
+                            "used_neural_dense": retrieval.used_neural_dense,
+                            "used_reranker": retrieval.used_reranker,
+                            "xref_hops": retrieval.xref_hops,
+                            "followup_rewritten": retrieval.followup_rewritten,
+                            "effective_query": retrieval.effective_query,
+                        },
                     },
                 )
 
@@ -1191,7 +1220,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                         "status": "verified",
                         "verified_count": len(citations),
                         "unverified_refs": [],
-                        "summary": f"원문 직접 추출 {len(citations)}건 (오프라인 즉시 검색)",
+                        "summary": f"원문 직접 추출 {len(citations)}건 (오프라인 즉시 검색 · {retrieval.elapsed_ms:.0f}ms)",
                     }
                     db.add_message(
                         session_id,
@@ -1209,6 +1238,56 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                     yield _sse("verification", v_inst)
                     yield _sse("done", {"has_evidence": True, "provider": "local-instant", "verification": v_inst})
                     return
+
+                # Two-Layer Verified Answer Cache (<15ms exact or semantic hit, zero LLM wait!)
+                answer_cache: TwoLayerAnswerCache = request.app.state.answer_cache
+                corpus_fp = db.get_corpus_fingerprint(body.notebook_id)
+                query_vec = None
+                if not retrieval.followup_rewritten:
+                    if neural_engine.is_embed_installed():
+                        try:
+                            qv = await asyncio.to_thread(neural_engine.encode_texts, [body.query], True)
+                            if qv.shape[0] > 0:
+                                query_vec = qv[0]
+                        except Exception:
+                            query_vec = None
+                    cached_ans = answer_cache.get(
+                        body.notebook_id,
+                        corpus_fp,
+                        body.doc_ids,
+                        body.mode,
+                        body.double_verify,
+                        body.query,
+                        query_vec=query_vec,
+                    )
+                    if cached_ans:
+                        c_text = str(cached_ans["text"])
+                        c_ver = dict(cached_ans.get("verification") or {})
+                        sem_tag = (
+                            f"유사 질문 캐시({cached_ans['semantic_hit']:.2f})"
+                            if cached_ans.get("semantic_hit")
+                            else "검증 답변 즉시 캐시"
+                        )
+                        c_ver["summary"] = f"{sem_tag} · {c_ver.get('summary', '근거 검증됨')}"
+                        c_ver["cache_hit"] = True
+                        c_prov = f"{cached_ans.get('provider', provider_id)} (cache)"
+                        db.add_message(
+                            session_id,
+                            "assistant",
+                            c_text,
+                            mode=body.mode,
+                            citations=citations,
+                            forms=forms_payload,
+                            verification=c_ver,
+                            provider=c_prov,
+                        )
+                        events.publish("chat_updated", session_id=session_id, group_id=active_group_id, actor_label=user.label)
+                        db.log_audit("query_cache_hit", user.role, user.label, client_ip, f"모드={body.mode} {sem_tag}")
+                        yield _sse("status", {"stage": "cache_hit", "message": f"{sem_tag} 적중 — 0.01초 즉시 응답"})
+                        yield _sse("delta", {"text": c_text})
+                        yield _sse("verification", c_ver)
+                        yield _sse("done", {"has_evidence": True, "provider": c_prov, "verification": c_ver})
+                        return
 
                 # Enter multi-user CLI worker queue
                 async for q_state in q_mgr.wait_turn(ticket):
@@ -1333,6 +1412,28 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
                 if double_verified and verification.get("status") == "verified":
                     verification["summary"] = f"이중 원문 대조 완료 · {verification['summary']}"
                 verification["double_verified"] = double_verified
+
+                if (
+                    not is_negative
+                    and not offline_fallback_used
+                    and not retrieval.followup_rewritten
+                    and verification.get("status") in ("verified", "partial")
+                    and len(full_text) >= 40
+                ):
+                    answer_cache.put(
+                        body.notebook_id,
+                        corpus_fp,
+                        body.doc_ids,
+                        body.mode,
+                        body.double_verify,
+                        body.query,
+                        payload={
+                            "text": full_text,
+                            "verification": verification,
+                            "provider": active_provider,
+                        },
+                        query_vec=query_vec,
+                    )
 
                 db.add_message(
                     session_id,
@@ -1654,12 +1755,128 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         user: AuthUser = Depends(require_admin),
     ) -> dict[str, Any]:
         db: Database = request.app.state.db
+        db.close_pooled_connections()
         try:
             res = restore_backup(db.db_path, name)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="백업 파일을 찾을 수 없습니다.")
+        request.app.state.answer_cache.clear()
+        neural_engine.invalidate_cache()
         db.log_audit("backup_restored", user.role, user.label, get_client_ip(request), f"복구: {name}")
         return {"ok": True, **res}
+
+    # ---- Engine v4.0 Status, Local ONNX Neural Pack & Precision Re-Index ----
+    @app.get("/api/engine/status")
+    def get_engine_status_route(
+        request: Request,
+        notebook_id: str = DEFAULT_NOTEBOOK_ID,
+        _: AuthUser = Depends(require_user),
+    ) -> dict[str, Any]:
+        db: Database = request.app.state.db
+        cache: TwoLayerAnswerCache = request.app.state.answer_cache
+        return {
+            "version": APP_VERSION,
+            "kiwi_active": is_kiwi_available(),
+            "stats": db.get_engine_stats(notebook_id),
+            "cache": cache.stats(),
+            "neural": neural_engine.status(db, notebook_id),
+        }
+
+    @app.post("/api/admin/engine/reindex")
+    async def reindex_engine_v4_route(
+        request: Request,
+        notebook_id: str = DEFAULT_NOTEBOOK_ID,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        db: Database = request.app.state.db
+        if not db.get_notebook(notebook_id):
+            raise HTTPException(status_code=404, detail="노트북을 찾을 수 없습니다.")
+
+        create_backup(db.db_path, reason="pre_v4_reindex")
+        job_id = "job_" + uuid.uuid4().hex[:10]
+        job_state: dict[str, Any] = {
+            "id": job_id,
+            "status": "running",
+            "progress": 2,
+            "message": "엔진 v4.0 계층 청킹 · Kiwi 형태소 · 교차참조 그래프 재색인 준비 중...",
+            "documents": [],
+            "error": "",
+        }
+        request.app.state.jobs[job_id] = job_state
+
+        def _worker() -> None:
+            try:
+                def _cb(pct: int, msg: str) -> None:
+                    job_state["progress"] = min(99, max(2, pct))
+                    job_state["message"] = msg
+
+                res = reindex_notebook_v4(db, notebook_id, progress_cb=_cb)
+                request.app.state.answer_cache.clear()
+                job_state["progress"] = 100
+                job_state["status"] = "done"
+                job_state["result"] = res
+                job_state["message"] = (
+                    f"v4.0 정밀 재색인 완료 — 청크 {res['chunks']}개 · 교차참조 {res['cross_refs']}건 · "
+                    f"구조화 표 {res['tables_extracted']}개"
+                )
+            except Exception as exc:
+                job_state["status"] = "error"
+                job_state["error"] = str(exc)
+                job_state["message"] = f"재색인 오류: {exc}"
+
+        db.log_audit("engine_reindex_v4", user.role, user.label, get_client_ip(request), f"노트북={notebook_id}")
+        asyncio.get_running_loop().run_in_executor(None, _worker)
+        return {"ok": True, "job_id": job_id, "status": "running"}
+
+    @app.post("/api/admin/engine/neural/install")
+    async def install_neural_pack_route(
+        request: Request,
+        notebook_id: str = DEFAULT_NOTEBOOK_ID,
+        include_reranker: bool = True,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        db: Database = request.app.state.db
+        if neural_engine.install_state.get("status") in ("downloading", "indexing"):
+            return {"ok": True, "already_running": True, "neural": neural_engine.status(db, notebook_id)}
+
+        def _worker() -> None:
+            try:
+                neural_engine.download_and_install_pack(db, notebook_id, include_reranker=include_reranker)
+                request.app.state.answer_cache.clear()
+            except Exception:
+                pass
+
+        db.log_audit(
+            "neural_pack_install",
+            user.role,
+            user.label,
+            get_client_ip(request),
+            f"노트북={notebook_id} 리랭커={include_reranker}",
+        )
+        asyncio.get_running_loop().run_in_executor(None, _worker)
+        return {"ok": True, "started": True, "neural": neural_engine.status(db, notebook_id)}
+
+    @app.delete("/api/admin/engine/neural")
+    def remove_neural_pack_route(
+        request: Request,
+        notebook_id: str = DEFAULT_NOTEBOOK_ID,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        db: Database = request.app.state.db
+        neural_engine.remove_pack(db)
+        request.app.state.answer_cache.clear()
+        db.log_audit("neural_pack_removed", user.role, user.label, get_client_ip(request), "로컬 ONNX 신경망 팩 제거")
+        return {"ok": True, "neural": neural_engine.status(db, notebook_id)}
+
+    @app.post("/api/admin/engine/cache/clear")
+    def clear_engine_cache_route(
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        request.app.state.answer_cache.clear()
+        neural_engine.invalidate_cache()
+        request.app.state.db.log_audit("engine_cache_cleared", user.role, user.label, get_client_ip(request), "답변·벡터 캐시 초기화")
+        return {"ok": True, "cache": request.app.state.answer_cache.stats()}
 
     @app.get("/api/admin/network")
     def get_network(request: Request, _: AuthUser = Depends(require_user)) -> dict[str, Any]:

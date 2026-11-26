@@ -50,6 +50,7 @@ import type {
   AuditLogItem,
   BackupItem,
   CliSettings,
+  EngineStatus,
   FeedbackInboxResponse,
   FeedbackStatus,
   FormItem,
@@ -121,6 +122,10 @@ export const AdminModal: React.FC<Props> = ({
   const [defaultDoubleVerify, setDefaultDoubleVerify] = useState(false);
   const [defaultChatShared, setDefaultChatShared] = useState(false);
   const [auditLogEnabled, setAuditLogEnabled] = useState(true);
+
+  // Engine v4.0 & Local ONNX Neural Pack state
+  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+  const [reindexJob, setReindexJob] = useState<{ id: string; progress: number; message: string; status: string } | null>(null);
 
   // Opt-In Auto-Update state
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
@@ -297,13 +302,16 @@ export const AdminModal: React.FC<Props> = ({
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [net, cliCfg, upd] = await Promise.all([
+      const nbId = activeNotebook?.id || 'mokpo-sarang-church';
+      const [net, cliCfg, upd, engSt] = await Promise.all([
         api.getNetwork(),
         api.getCliSettings(),
         api.checkUpdates(false).catch(() => null),
+        api.getEngineStatus(nbId).catch(() => null),
       ]);
       setNetwork(net);
       setCli(cliCfg);
+      if (engSt) setEngineStatus(engSt);
       setConnectionMode(cliCfg.connection_mode || 'auto');
       setProvider(cliCfg.provider);
       setModel(cliCfg.model || '');
@@ -370,6 +378,46 @@ export const AdminModal: React.FC<Props> = ({
     }, 1500);
     return () => window.clearInterval(timer);
   }, [updateRestarting, updateInfo]);
+
+  useEffect(() => {
+    const nst = engineStatus?.neural?.install_state?.status;
+    if (nst !== 'downloading' && nst !== 'indexing') return;
+    const nbId = activeNotebook?.id || 'mokpo-sarang-church';
+    const timer = window.setInterval(() => {
+      void api
+        .getEngineStatus(nbId)
+        .then((st) => {
+          setEngineStatus(st);
+          if (st.neural.install_state.status === 'ready') {
+            setMsg(st.neural.install_state.message || '로컬 신경망 고정밀 검색 팩 설치가 완료되었습니다.');
+          } else if (st.neural.install_state.status === 'error') {
+            setMsg(st.neural.install_state.error || '신경망 팩 설치 중 오류가 발생했습니다.');
+          }
+        })
+        .catch(() => {});
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [engineStatus?.neural?.install_state?.status, activeNotebook?.id]);
+
+  useEffect(() => {
+    if (!reindexJob || reindexJob.status !== 'running') return;
+    const nbId = activeNotebook?.id || 'mokpo-sarang-church';
+    const timer = window.setInterval(() => {
+      void api
+        .getJob(reindexJob.id)
+        .then((job) => {
+          setReindexJob(job);
+          if (job.status === 'done') {
+            setMsg(job.message || '엔진 v4.0 정밀 재색인이 완료되었습니다.');
+            void api.getEngineStatus(nbId).then(setEngineStatus).catch(() => {});
+          } else if (job.status === 'error') {
+            setMsg(job.error || job.message || '재색인 중 오류가 발생했습니다.');
+          }
+        })
+        .catch(() => {});
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [reindexJob, activeNotebook?.id]);
 
   useEffect(() => {
     void loadAll();
@@ -443,6 +491,67 @@ export const AdminModal: React.FC<Props> = ({
       });
     } finally {
       setTestingAi(false);
+    }
+  };
+
+  const handleReindexV4 = async () => {
+    if (!activeNotebook) return;
+    if (!window.confirm('현재 노트북의 전체 문서를 엔진 v4.0(Kiwi 형태소·계층 청크·교차참조 그래프·구조화 표)으로 정밀 재색인할까요? (기존 대화·서식·설정은 100% 보존됩니다)')) return;
+    setBusyAction(true);
+    setMsg('');
+    try {
+      const res = await api.reindexEngineV4(activeNotebook.id);
+      setReindexJob({ id: res.job_id, progress: 5, message: 'v4.0 정밀 재색인 시작...', status: 'running' });
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '재색인 시작 실패');
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleInstallNeuralPack = async () => {
+    const nbId = activeNotebook?.id || 'mokpo-sarang-church';
+    if (!window.confirm('로컬 CPU ONNX 신경망 팩(다국어 임베딩 + Cross-Encoder 리랭커, 약 380MB)을 data/models/ 폴더에 다운로드하고 벡터 색인을 구축할까요? 설치 후에는 100% 오프라인으로 동작합니다.')) return;
+    setBusyAction(true);
+    setMsg('');
+    try {
+      const res = await api.installNeuralPack(nbId, true);
+      setEngineStatus((prev) => (prev ? { ...prev, neural: res.neural } : prev));
+      setMsg('로컬 신경망 팩 다운로드 및 벡터 색인 구축을 시작했습니다.');
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '신경망 팩 설치 시작 실패');
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleRemoveNeuralPack = async () => {
+    const nbId = activeNotebook?.id || 'mokpo-sarang-church';
+    if (!window.confirm('설치된 로컬 ONNX 신경망 팩과 벡터 색인을 제거할까요? (기본 Kiwi + 교차참조 v4.0 검색은 그대로 유지됩니다)')) return;
+    setBusyAction(true);
+    setMsg('');
+    try {
+      const res = await api.removeNeuralPack(nbId);
+      setEngineStatus((prev) => (prev ? { ...prev, neural: res.neural } : prev));
+      setMsg('로컬 신경망 팩이 제거되었습니다.');
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '신경망 팩 제거 실패');
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleClearEngineCache = async () => {
+    setBusyAction(true);
+    setMsg('');
+    try {
+      const res = await api.clearEngineCache();
+      setEngineStatus((prev) => (prev ? { ...prev, cache: res.cache } : prev));
+      setMsg('답변 즉시 캐시와 벡터 메모리 캐시가 초기화되었습니다.');
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '캐시 초기화 실패');
+    } finally {
+      setBusyAction(false);
     }
   };
 
@@ -1420,6 +1529,140 @@ export const AdminModal: React.FC<Props> = ({
                   </span>
                 </div>
               </div>
+
+              {/* Engine v4.0 Core Retrieval + Optional Local ONNX Neural Pack */}
+              {engineStatus && (
+                <div className="space-y-3 rounded-xl border border-black/[0.08] p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <p className="text-xs font-semibold text-[#18181b]">
+                          내부 검색 엔진 v{engineStatus.version}
+                        </p>
+                        <span
+                          className={`chip-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                            engineStatus.kiwi_active
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-zinc-200 text-zinc-600'
+                          }`}
+                        >
+                          {engineStatus.kiwi_active ? 'Kiwi 한국어 형태소 활성' : '기본 토크나이저'}
+                        </span>
+                        {engineStatus.neural.active && (
+                          <span className="chip-nowrap rounded-full bg-[#0f4c81]/10 px-2 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                            ONNX 로컬 신경망 활성
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-[#71717a]">
+                        계층 청크 {engineStatus.stats.chunks.toLocaleString()}개 · 조문 교차참조 {engineStatus.stats.cross_refs.toLocaleString()}건 · 구조화 표 {engineStatus.stats.structured_tables}개 · 답변 캐시 {engineStatus.cache.entries}건 (적중 {engineStatus.cache.hits}회)
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Optional 1-Click Local CPU ONNX Neural Pack */}
+                  <div className="rounded-lg border border-black/[0.07] bg-[#fafaf9] p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11.5px] font-semibold text-[#18181b]">
+                          로컬 신경망 고정밀 팩 (ONNX INT8 · 선택 설치)
+                        </p>
+                        <p className="text-[10.5px] leading-snug text-[#71717a]">
+                          다국어 임베딩(multilingual-e5-small) + Cross-Encoder 리랭커(jina-reranker-v2)를 PC 내부에 설치하면, 일상적 표현 질문과 유사 질문 즉시 캐시 정확도가 더욱 높아집니다. (무료 · 100% 오프라인 동작)
+                        </p>
+                      </div>
+                      {engineStatus.neural.embed_installed ? (
+                        <span className="chip-nowrap rounded-md bg-emerald-100 px-2 py-1 text-[10.5px] font-semibold text-emerald-800">
+                          설치됨 · 벡터 {engineStatus.neural.embedded_chunks}/{engineStatus.neural.total_chunks} ({engineStatus.neural.disk_mb}MB)
+                        </span>
+                      ) : (
+                        <span className="chip-nowrap rounded-md bg-white px-2 py-1 text-[10.5px] font-medium text-[#71717a] ring-1 ring-black/[0.08]">
+                          미설치 (약 380MB)
+                        </span>
+                      )}
+                    </div>
+
+                    {(engineStatus.neural.install_state.status === 'downloading' ||
+                      engineStatus.neural.install_state.status === 'indexing') && (
+                      <div className="space-y-1 pt-1">
+                        <div className="flex items-center justify-between text-[11px] font-medium text-[#0f4c81]">
+                          <span className="truncate">{engineStatus.neural.install_state.message}</span>
+                          <span className="tabular-nums">{engineStatus.neural.install_state.progress}%</span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/[0.08]">
+                          <div
+                            className="h-full rounded-full bg-[#0f4c81] transition-all"
+                            style={{ width: `${Math.max(4, engineStatus.neural.install_state.progress)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {reindexJob && reindexJob.status === 'running' && (
+                      <div className="space-y-1 pt-1">
+                        <div className="flex items-center justify-between text-[11px] font-medium text-[#0f4c81]">
+                          <span className="truncate">{reindexJob.message}</span>
+                          <span className="tabular-nums">{reindexJob.progress}%</span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/[0.08]">
+                          <div
+                            className="h-full rounded-full bg-[#0f4c81] transition-all"
+                            style={{ width: `${Math.max(5, reindexJob.progress)}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {isAdmin && (
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        {!engineStatus.neural.embed_installed ? (
+                          <button
+                            type="button"
+                            disabled={
+                              busyAction ||
+                              engineStatus.neural.install_state.status === 'downloading' ||
+                              engineStatus.neural.install_state.status === 'indexing'
+                            }
+                            onClick={() => void handleInstallNeuralPack()}
+                            className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3 py-1.5 text-[11.5px] font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-50"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            <span>로컬 신경망 팩 1클릭 설치</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={busyAction}
+                            onClick={() => void handleRemoveNeuralPack()}
+                            className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-[11.5px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            <span>신경망 팩 제거</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={busyAction || reindexJob?.status === 'running'}
+                          onClick={() => void handleReindexV4()}
+                          className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.12] bg-white px-2.5 py-1.5 text-[11.5px] font-semibold text-[#18181b] hover:bg-[#f7f7f5] disabled:opacity-50"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${reindexJob?.status === 'running' ? 'animate-spin' : ''}`} />
+                          <span>전체 자료 v4.0 정밀 재색인</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busyAction}
+                          onClick={() => void handleClearEngineCache()}
+                          className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-[#52525b] hover:bg-[#f7f7f5] disabled:opacity-50"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          <span>답변 캐시 초기화</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Connection Mode Switcher: Auto | CLI | API */}
               <div className="space-y-2.5 rounded-xl border border-black/[0.08] p-4">

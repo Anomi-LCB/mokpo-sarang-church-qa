@@ -881,6 +881,7 @@ export function App() {
                 hasEvidence: payload.has_evidence,
                 citations: payload.citations || [],
                 forms: payload.forms || [],
+                engineMeta: payload.engine || undefined,
               });
             } else if (evName === 'delta') {
               appendAiText(payload.text || '');
