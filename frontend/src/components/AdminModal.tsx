@@ -17,6 +17,8 @@ import {
   Loader2,
   Lock,
   LogOut,
+  Monitor,
+  Moon,
   PlugZap,
   Plus,
   QrCode,
@@ -29,6 +31,7 @@ import {
   ShieldCheck,
   SkipForward,
   Smartphone,
+  Sun,
   Terminal,
   Trash2,
   Upload,
@@ -40,6 +43,7 @@ import {
 import { api, authHeaders, triggerTicketDownload } from '../api';
 import { cacheFormPdfBlob, countCachedFormPdfs, saveOfflineBundle } from '../offlineStore';
 import { loadUserProfile, saveUserProfile, type UserProfile } from '../profileStore';
+import type { ThemeMode } from '../themeStore';
 import type {
   AiConnectionMode,
   AiTestResult,
@@ -68,6 +72,8 @@ interface Props {
   onOfflineSynced?: (syncedAt: string) => void;
   disableFormsPanel: boolean;
   onDisableFormsPanelChange: (disabled: boolean) => void;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
   onNotebooksChanged: (selectId?: string) => void;
   onPinSecurityChanged?: (isDefaultPin: boolean) => void;
   onClose: () => void;
@@ -83,6 +89,8 @@ export const AdminModal: React.FC<Props> = ({
   onOfflineSynced,
   disableFormsPanel,
   onDisableFormsPanelChange,
+  themeMode,
+  onThemeModeChange,
   onNotebooksChanged,
   onPinSecurityChanged,
   onClose,
@@ -1350,8 +1358,40 @@ export const AdminModal: React.FC<Props> = ({
             </div>
           ) : tab === 'cli' && cli ? (
             <div className="space-y-4">
-              {/* Display Layout Options (Available for all users) */}
-              <div className="rounded-xl border border-black/[0.08] p-4">
+              {/* Display Layout & Theme Options (Available for all users) */}
+              <div className="space-y-3 rounded-xl border border-black/[0.08] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/[0.06] pb-3">
+                  <div>
+                    <p className="text-xs font-semibold text-[#18181b]">화면 테마 (라이트 · 다크 모드)</p>
+                    <p className="text-[11px] text-[#71717a]">
+                      야간·장시간 문서 검토 시 눈의 피로를 줄여 주는 다크 모드를 선택할 수 있습니다
+                    </p>
+                  </div>
+                  <div className="inline-flex rounded-lg bg-[#f0f0ee] p-0.5">
+                    {(
+                      [
+                        { id: 'light', label: '라이트', Icon: Sun },
+                        { id: 'dark', label: '다크', Icon: Moon },
+                        { id: 'system', label: '시스템', Icon: Monitor },
+                      ] as const
+                    ).map(({ id, label, Icon }) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => onThemeModeChange(id)}
+                        className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                          themeMode === id
+                            ? 'bg-white text-[#18181b] shadow-2xs'
+                            : 'text-[#71717a] hover:text-[#18181b]'
+                        }`}
+                      >
+                        <Icon className="h-3 w-3" />
+                        <span>{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 <label className="flex cursor-pointer items-center justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold text-[#18181b]">오른쪽 서식·표 창 완전히 끄기</p>

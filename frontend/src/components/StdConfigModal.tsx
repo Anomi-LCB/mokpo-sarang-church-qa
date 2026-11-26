@@ -458,6 +458,7 @@ export const StdConfigModal: React.FC<Props> = ({ config, onSaved, onClose }) =>
             <div className="space-y-4">
               {/* Live Mini Cover Preview */}
               <div
+                data-paper="a4"
                 className="rounded-xl border border-black/[0.1] bg-white p-4 shadow-xs"
                 style={{ borderLeft: `8px solid ${tpl.accent_color}` }}
               >

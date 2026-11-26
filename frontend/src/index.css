@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @layer base {
   html, body {
@@ -38,10 +39,16 @@
   min-width: 0;
 }
 
+/* Off-screen paint/layout virtualization for long form & document lists */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 92px;
+}
+
 /* Editorial hover-reveal discipline: invisible at rest on desktop, crisp fade-in on hover/focus */
 .mac-hover-reveal {
   opacity: 1;
-  transition: opacity 140ms cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  transition: opacity 110ms ease-out;
 }
 
 @media (min-width: 1024px) {
@@ -63,9 +70,222 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(24, 24, 27, 0.13);
+  background: rgba(24, 24, 27, 0.14);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(24, 24, 27, 0.26);
+  background: rgba(24, 24, 27, 0.28);
+}
+
+/* ==========================================================================
+   Cohesive Obsidian Editorial Dark Mode (100% App Coverage)
+   Preserves realistic white paper inside [data-paper="a4"] print/PDF previews!
+   ========================================================================== */
+html.dark,
+html.dark body {
+  background-color: #141416 !important;
+  color: #f4f4f6 !important;
+}
+
+html.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+}
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.30);
+}
+
+/* Surface mapping (skip printable A4 paper regions) */
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-white,
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-white\/95,
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-white\/98,
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-white\/90 {
+  background-color: #18181c !important;
+}
+
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f7f7f5\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#fafaf9\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#fbfbfd\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f8f8f7\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f5f5f7\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f4f4f2\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-slate-100,
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-slate-50 {
+  background-color: #1e1e24 !important;
+}
+
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f0f0ee\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#ededeb\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-black\/\[0\.05\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-black\/\[0\.06\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-black\/\[0\.04\] {
+  background-color: #27272f !important;
+}
+
+/* Elevated modal cards & floating tooltips */
+html.dark .fixed .bg-white,
+html.dark [role="tooltip"].bg-white {
+  background-color: #1d1d22 !important;
+}
+html.dark .fixed .bg-\[\#fafaf9\],
+html.dark .fixed .bg-\[\#f7f7f5\],
+html.dark .fixed .bg-\[\#fbfbfd\] {
+  background-color: #23232a !important;
+}
+
+/* Composer gradient fade in dark mode */
+html.dark .from-white {
+  --tw-gradient-from: #18181c !important;
+  --tw-gradient-via: #18181c !important;
+  --tw-gradient-to: rgba(24, 24, 28, 0.85) !important;
+}
+
+/* Primary solid dark buttons flip cleanly to crisp light-ink or refined slate-blue */
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#18181b\] {
+  background-color: #e4e4e7 !important;
+  color: #141416 !important;
+}
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#18181b\]:hover {
+  background-color: #ffffff !important;
+}
+html.dark .bg-\[\#18181b\].text-white {
+  color: #141416 !important;
+}
+
+/* User chat bubble keeps deep refined charcoal-navy distinction */
+html.dark [data-bubble="user"] {
+  background-color: #1d4e7a !important;
+  color: #f8fafc !important;
+}
+
+/* Text ink hierarchy */
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#18181b\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#1d1d1f\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-slate-900 {
+  color: #f4f4f6 !important;
+}
+
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#27272a\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#2c2c2e\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#3f3f46\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#3a3a3c\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-slate-800,
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-slate-700 {
+  color: #d4d4d8 !important;
+}
+
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#52525b\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#6e6e73\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#71717a\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-slate-600 {
+  color: #a1a1aa !important;
+}
+
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#8a8a8e\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#a1a1aa\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-slate-500 {
+  color: #82828d !important;
+}
+
+/* High-legibility accent blue in dark mode */
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).text-\[\#0f4c81\] {
+  color: #60a5fa !important;
+}
+html.dark .bg-\[\#0f4c81\] {
+  background-color: #2563eb !important;
+  color: #ffffff !important;
+}
+html.dark .bg-\[\#0f4c81\]\/10,
+html.dark .bg-\[\#0f4c81\]\/12,
+html.dark .bg-\[\#0f4c81\]\/\[0\.04\],
+html.dark .bg-\[\#0f4c81\]\/\[0\.06\] {
+  background-color: rgba(59, 130, 246, 0.16) !important;
+}
+html.dark .border-\[\#0f4c81\],
+html.dark .border-\[\#0f4c81\]\/35,
+html.dark .border-\[\#0f4c81\]\/40 {
+  border-color: rgba(96, 165, 250, 0.45) !important;
+}
+
+/* Hairline borders & dividers */
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-black\/\[0\.06\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-black\/\[0\.07\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-black\/\[0\.075\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-black\/\[0\.08\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-black\/\[0\.09\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-black\/\[0\.1\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-black\/\[0\.12\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).border-slate-200 {
+  border-color: rgba(255, 255, 255, 0.095) !important;
+}
+html.dark .divide-black\/\[0\.06\] > :not(:last-child),
+html.dark .divide-black\/\[0\.05\] > :not(:last-child) {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+html.dark .ring-black\/\[0\.06\],
+html.dark .ring-black\/\[0\.07\],
+html.dark .ring-black\/\[0\.08\] {
+  --tw-ring-color: rgba(255, 255, 255, 0.11) !important;
+}
+
+/* Status pills (emerald / amber / red) harmonized for dark surfaces */
+html.dark .bg-emerald-50,
+html.dark .bg-emerald-50\/90 {
+  background-color: rgba(16, 185, 129, 0.14) !important;
+}
+html.dark .text-emerald-800,
+html.dark .text-emerald-900,
+html.dark .text-emerald-700 {
+  color: #6ee7b7 !important;
+}
+html.dark .border-emerald-200,
+html.dark .ring-emerald-200,
+html.dark .ring-emerald-200\/70 {
+  border-color: rgba(52, 211, 153, 0.3) !important;
+  --tw-ring-color: rgba(52, 211, 153, 0.3) !important;
+}
+html.dark .bg-amber-50,
+html.dark .bg-amber-50\/85,
+html.dark .bg-amber-100 {
+  background-color: rgba(245, 158, 11, 0.15) !important;
+}
+html.dark .text-amber-800,
+html.dark .text-amber-900,
+html.dark .text-amber-950\/90 {
+  color: #fcd34d !important;
+}
+html.dark .bg-red-50 {
+  background-color: rgba(239, 68, 68, 0.15) !important;
+}
+html.dark .text-red-700,
+html.dark .text-red-600 {
+  color: #fca5a5 !important;
+}
+
+/* Hover states in dark mode */
+html.dark .hover\:bg-black\/\[0\.04\]:hover,
+html.dark .hover\:bg-black\/\[0\.045\]:hover,
+html.dark .hover\:bg-black\/\[0\.05\]:hover,
+html.dark .hover\:bg-black\/\[0\.06\]:hover,
+html.dark .hover\:bg-black\/\[0\.07\]:hover,
+html.dark .hover\:bg-\[\#fafaf9\]:hover,
+html.dark .hover\:bg-\[\#f7f7f5\]:hover,
+html.dark .hover\:bg-\[\#ededeb\]:hover,
+html.dark .hover\:bg-\[\#f4f4f2\]:hover,
+html.dark .hover\:bg-white:hover {
+  background-color: rgba(255, 255, 255, 0.065) !important;
+}
+
+/* Form inputs & selects in dark mode */
+html.dark input:not([type="checkbox"]):not([type="radio"]):not([data-paper="a4"] *),
+html.dark textarea:not([data-paper="a4"] *),
+html.dark select:not([data-paper="a4"] *) {
+  color: #f4f4f6 !important;
+}
+html.dark select option {
+  background-color: #1d1d22;
+  color: #f4f4f6;
+}
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #71717a !important;
 }

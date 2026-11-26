@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { memo, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -64,7 +64,99 @@ const MOBILE_MODE_OPTS: Array<{ id: AnswerMode; label: string; desc: string }> =
   { id: 'advisory', label: '제안', desc: '원문 근거에 더해 실무 적용 주의점과 행정 실행안을 함께 제안합니다.' },
 ];
 
-export const ChatPanel: React.FC<Props> = ({
+const ChatComposer = memo<{
+  busy: boolean;
+  instantMode: boolean;
+  doubleVerify: boolean;
+  selectedDocCount: number;
+  onInstantToggle: (v: boolean) => void;
+  onDoubleVerifyToggle: (v: boolean) => void;
+  onSend: (query: string) => void;
+}>(({ busy, instantMode, doubleVerify, selectedDocCount, onInstantToggle, onDoubleVerifyToggle, onSend }) => {
+  const [input, setInput] = useState('');
+
+  const submit = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const q = input.trim();
+    if (!q || busy) return;
+    setInput('');
+    onSend(q);
+  };
+
+  return (
+    <div className="bg-gradient-to-t from-white via-white to-white/85 px-3.5 pt-1.5 pb-3 sm:px-6 sm:pb-4">
+      <div className="mx-auto max-w-[700px] space-y-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 px-1">
+          <button
+            type="button"
+            onClick={() => onInstantToggle(!instantMode)}
+            title="AI 호출 없이 0.05초 만에 오프라인 원문 조항을 바로 찾습니다"
+            className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+              instantMode
+                ? 'bg-amber-100 text-amber-900 ring-1 ring-amber-300/80'
+                : 'text-[#71717a] hover:bg-black/[0.045] hover:text-[#18181b]'
+            }`}
+          >
+            <Zap className="h-3 w-3" />
+            <span>즉시 원문 검색</span>
+          </button>
+
+          {!instantMode && (
+            <button
+              type="button"
+              onClick={() => onDoubleVerifyToggle(!doubleVerify)}
+              title="답변 생성 후 AI가 원본 조항·숫자·쪽수를 1:1 재대조합니다"
+              className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                doubleVerify
+                  ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
+                  : 'text-[#71717a] hover:bg-black/[0.045] hover:text-[#18181b]'
+              }`}
+            >
+              <ShieldCheck className="h-3 w-3" />
+              <span>이중 원문 재대조</span>
+            </button>
+          )}
+        </div>
+
+        <form onSubmit={submit}>
+          <div className="flex items-end gap-2 rounded-2xl border border-black/[0.12] bg-[#fafaf9] p-1.5 pl-3.5 transition focus-within:border-[#18181b]/50 focus-within:bg-white focus-within:shadow-[0_4px_16px_rgba(0,0,0,0.05)]">
+            <textarea
+              rows={1}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder={
+                selectedDocCount === 0
+                  ? '검색 자료를 먼저 선택하세요'
+                  : instantMode
+                    ? '키워드·조항 즉시 검색...'
+                    : '법규·행정 규정에 대해 질문하세요...'
+              }
+              disabled={selectedDocCount === 0}
+              className="h-[38px] max-h-28 min-w-0 flex-1 resize-none bg-transparent py-2 text-[16px] leading-5 text-[#18181b] placeholder-[#a1a1aa] outline-none disabled:opacity-45 lg:text-[14px]"
+            />
+            <button
+              type="submit"
+              disabled={!input.trim() || busy || selectedDocCount === 0}
+              aria-label="질문 전송"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[#18181b] text-white transition hover:bg-[#27272a] disabled:bg-black/[0.08] disabled:text-[#a1a1aa]"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" strokeWidth={2.2} />}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+});
+ChatComposer.displayName = 'ChatComposer';
+
+export const ChatPanel: React.FC<Props> = memo(({
   notebook,
   activeSession = null,
   messages,
@@ -81,7 +173,6 @@ export const ChatPanel: React.FC<Props> = ({
   onOpenViewer,
   onOpenAutofill,
 }) => {
-  const [input, setInput] = useState('');
   const [openCites, setOpenCites] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string>('');
   const [exportingId, setExportingId] = useState<string>('');
@@ -93,14 +184,6 @@ export const ChatPanel: React.FC<Props> = ({
       el.scrollTop = el.scrollHeight;
     }
   }, [messages]);
-
-  const submit = (e?: React.FormEvent) => {
-    e?.preventDefault();
-    const q = input.trim();
-    if (!q || busy) return;
-    setInput('');
-    onSend(q);
-  };
 
   const toggleCites = (msgId: string) => {
     setOpenCites((prev) => ({ ...prev, [msgId]: !prev[msgId] }));
@@ -228,7 +311,10 @@ export const ChatPanel: React.FC<Props> = ({
                     {msg.author_label && (activeSession?.group_id || activeSession?.is_shared) && (
                       <span className="px-1 text-[10.5px] font-medium text-[#71717a]">{msg.author_label}</span>
                     )}
-                    <div className="rounded-2xl rounded-br-sm bg-[#18181b] px-4 py-2.5 text-[14px] leading-relaxed text-white">
+                    <div
+                      data-bubble="user"
+                      className="rounded-2xl rounded-br-sm bg-[#18181b] px-4 py-2.5 text-[14px] leading-relaxed text-white"
+                    >
                       {msg.content}
                     </div>
                   </div>
@@ -442,75 +528,17 @@ export const ChatPanel: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Sleek Editorial Composer */}
-      <div className="bg-gradient-to-t from-white via-white to-white/85 px-3.5 pt-1.5 pb-3 sm:px-6 sm:pb-4">
-        <div className="mx-auto max-w-[700px] space-y-1.5">
-          <div className="flex flex-wrap items-center gap-1.5 px-1">
-            <button
-              type="button"
-              onClick={() => onInstantToggle(!instantMode)}
-              title="AI 호출 없이 0.05초 만에 오프라인 원문 조항을 바로 찾습니다"
-              className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                instantMode
-                  ? 'bg-amber-100 text-amber-900 ring-1 ring-amber-300/80'
-                  : 'text-[#71717a] hover:bg-black/[0.045] hover:text-[#18181b]'
-              }`}
-            >
-              <Zap className="h-3 w-3" />
-              <span>즉시 원문 검색</span>
-            </button>
-
-            {!instantMode && (
-              <button
-                type="button"
-                onClick={() => onDoubleVerifyToggle(!doubleVerify)}
-                title="답변 생성 후 AI가 원본 조항·숫자·쪽수를 1:1 재대조합니다"
-                className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-                  doubleVerify
-                    ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
-                    : 'text-[#71717a] hover:bg-black/[0.045] hover:text-[#18181b]'
-                }`}
-              >
-                <ShieldCheck className="h-3 w-3" />
-                <span>이중 원문 재대조</span>
-              </button>
-            )}
-          </div>
-
-          <form onSubmit={submit}>
-            <div className="flex items-end gap-2 rounded-2xl border border-black/[0.12] bg-[#fafaf9] p-1.5 pl-3.5 transition focus-within:border-[#18181b]/50 focus-within:bg-white focus-within:shadow-[0_4px_16px_rgba(0,0,0,0.05)]">
-              <textarea
-                rows={1}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    submit();
-                  }
-                }}
-                placeholder={
-                  selectedDocCount === 0
-                    ? '검색 자료를 먼저 선택하세요'
-                    : instantMode
-                      ? '키워드·조항 즉시 검색...'
-                      : '법규·행정 규정에 대해 질문하세요...'
-                }
-                disabled={selectedDocCount === 0}
-                className="h-[38px] max-h-28 min-w-0 flex-1 resize-none bg-transparent py-2 text-[16px] leading-5 text-[#18181b] placeholder-[#a1a1aa] outline-none disabled:opacity-45 lg:text-[14px]"
-              />
-              <button
-                type="submit"
-                disabled={!input.trim() || busy || selectedDocCount === 0}
-                aria-label="질문 전송"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[#18181b] text-white transition hover:bg-[#27272a] disabled:bg-black/[0.08] disabled:text-[#a1a1aa]"
-              >
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" strokeWidth={2.2} />}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
+      {/* Isolated Editorial Composer (typing never re-renders chat messages!) */}
+      <ChatComposer
+        busy={busy}
+        instantMode={instantMode}
+        doubleVerify={doubleVerify}
+        selectedDocCount={selectedDocCount}
+        onInstantToggle={onInstantToggle}
+        onDoubleVerifyToggle={onDoubleVerifyToggle}
+        onSend={onSend}
+      />
     </div>
   );
-};
+});
+ChatPanel.displayName = 'ChatPanel';

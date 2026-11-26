@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUpCircle,
   BookOpen,
@@ -8,6 +8,7 @@ import {
   FolderOpen,
   LogOut,
   MessageSquareText,
+  Moon,
   PanelLeft,
   PanelRight,
   PlusSquare,
@@ -18,30 +19,43 @@ import {
   Share,
   SlidersHorizontal,
   SquarePen,
+  Sun,
+  UserCheck,
   Users,
   WifiOff,
   X,
 } from 'lucide-react';
 import { api, authHeaders, isIOS, isStandalonePWA } from './api';
-import { AdminModal, type AdminTab } from './components/AdminModal';
-import { AutofillModal } from './components/AutofillModal';
+import type { AdminTab } from './components/AdminModal';
 import { ChatPanel } from './components/ChatPanel';
-import { CommandPaletteModal } from './components/CommandPaletteModal';
-import { FeedbackModal } from './components/FeedbackModal';
 import { FormsVault } from './components/FormsVault';
-import { GroupsModal } from './components/GroupsModal';
-import { LibraryModal } from './components/LibraryModal';
-import { PageViewerModal } from './components/PageViewerModal';
 import { PinGate } from './components/PinGate';
 import { SourcesPanel } from './components/SourcesPanel';
-import { StandardizationWorkspace } from './components/StandardizationWorkspace';
-import { UpdateModal } from './components/UpdateModal';
 import {
   loadShelfState,
   resolveShelfDocuments,
   saveShelfState,
   type ShelfState,
 } from './libraryStore';
+import { loadUserProfile } from './profileStore';
+import { applyThemeMode, loadThemeMode, resolveIsDark, type ThemeMode } from './themeStore';
+
+// Lazy-loaded heavy modals & secondary workspace for 2x faster cold boot
+const AdminModal = lazy(() => import('./components/AdminModal').then((m) => ({ default: m.AdminModal })));
+const AutofillModal = lazy(() => import('./components/AutofillModal').then((m) => ({ default: m.AutofillModal })));
+const CommandPaletteModal = lazy(() =>
+  import('./components/CommandPaletteModal').then((m) => ({ default: m.CommandPaletteModal }))
+);
+const FeedbackModal = lazy(() => import('./components/FeedbackModal').then((m) => ({ default: m.FeedbackModal })));
+const GroupsModal = lazy(() => import('./components/GroupsModal').then((m) => ({ default: m.GroupsModal })));
+const LibraryModal = lazy(() => import('./components/LibraryModal').then((m) => ({ default: m.LibraryModal })));
+const PageViewerModal = lazy(() =>
+  import('./components/PageViewerModal').then((m) => ({ default: m.PageViewerModal }))
+);
+const StandardizationWorkspace = lazy(() =>
+  import('./components/StandardizationWorkspace').then((m) => ({ default: m.StandardizationWorkspace }))
+);
+const UpdateModal = lazy(() => import('./components/UpdateModal').then((m) => ({ default: m.UpdateModal })));
 import {
   bundleToDocuments,
   bundleToNotebook,
@@ -150,7 +164,30 @@ export function App() {
       return false;
     }
   });
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadThemeMode());
+  const [isDark, setIsDark] = useState<boolean>(() => resolveIsDark(loadThemeMode()));
+  const [profileName, setProfileName] = useState<string>(() => loadUserProfile().name || '');
   const [mobileTab, setMobileTab] = useState<'chat' | 'sources' | 'forms'>('chat');
+
+  useEffect(() => {
+    setIsDark(applyThemeMode(themeMode));
+    if (themeMode !== 'system' || typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setIsDark(applyThemeMode('system'));
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
+  }, [themeMode]);
+
+  const handleThemeModeChange = useCallback((next: ThemeMode) => {
+    setThemeMode(next);
+    setIsDark(applyThemeMode(next));
+  }, []);
+
+  const toggleQuickDarkMode = useCallback(() => {
+    const next: ThemeMode = isDark ? 'light' : 'dark';
+    setThemeMode(next);
+    setIsDark(applyThemeMode(next));
+  }, [isDark]);
 
   const toggleSidebar = () => {
     setShowSidebar((prev) => {
@@ -252,16 +289,20 @@ export function App() {
   useEffect(() => {
     if (!auth?.authenticated || isOfflineMode) return;
     let cancelled = false;
-    void api
-      .checkUpdates(false)
-      .then((res) => {
-        if (!cancelled && res.settings?.auto_check !== false) {
-          setUpdateInfo(res);
-        }
-      })
-      .catch(() => {});
+    // Defer update check so startup render & first interaction stay 100% snag-free
+    const timer = window.setTimeout(() => {
+      void api
+        .checkUpdates(false)
+        .then((res) => {
+          if (!cancelled && res.settings?.auto_check !== false) {
+            setUpdateInfo(res);
+          }
+        })
+        .catch(() => {});
+    }, 2200);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
   }, [auth?.authenticated, isOfflineMode]);
 
@@ -296,10 +337,25 @@ export function App() {
         setOfflineSyncedAt(existing.synced_at || existing.generated_at);
       }
       if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-      const raw = await api.getOfflineBundle(nbId);
+      const etagKey = `church_search_offline_etag_${nbId}`;
+      let savedEtag = '';
+      try {
+        savedEtag = existing ? localStorage.getItem(etagKey) || '' : '';
+      } catch {
+        // ignore
+      }
+      // Wait for browser idle / 4s so initial render & user interactions never compete with 919p sync
+      await new Promise((r) => window.setTimeout(r, 4000));
+      const res = await api.getOfflineBundleConditional(nbId, savedEtag);
+      if (res.notModified) return;
       const syncedAt = new Date().toISOString();
-      const full: OfflineBundle = { ...raw, synced_at: syncedAt };
+      const full: OfflineBundle = { ...res.bundle, synced_at: syncedAt };
       await saveOfflineBundle(full);
+      try {
+        if (res.etag) localStorage.setItem(etagKey, res.etag);
+      } catch {
+        // ignore
+      }
       setOfflineBundle(full);
       setOfflineSyncedAt(syncedAt);
     } catch {
@@ -719,10 +775,22 @@ export function App() {
     const updateAi = (patch: Partial<ChatMessage>) => {
       setMessages((prev) => prev.map((m) => (m.id === aiMsgId ? { ...m, ...patch } : m)));
     };
-    const appendAiText = (delta: string) => {
+    let pendingDelta = '';
+    let rafId: number | null = null;
+    const flushDelta = () => {
+      rafId = null;
+      if (!pendingDelta) return;
+      const chunk = pendingDelta;
+      pendingDelta = '';
       setMessages((prev) =>
-        prev.map((m) => (m.id === aiMsgId ? { ...m, content: m.content + delta } : m))
+        prev.map((m) => (m.id === aiMsgId ? { ...m, content: m.content + chunk } : m))
       );
+    };
+    const appendAiText = (delta: string) => {
+      pendingDelta += delta;
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(flushDelta);
+      }
     };
 
     const runOfflineAnswer = (bundle: OfflineBundle) => {
@@ -817,10 +885,21 @@ export function App() {
             } else if (evName === 'delta') {
               appendAiText(payload.text || '');
             } else if (evName === 'replace') {
+              if (rafId !== null) {
+                window.cancelAnimationFrame(rafId);
+                rafId = null;
+              }
+              pendingDelta = '';
               updateAi({ content: payload.text || '' });
             } else if (evName === 'verification') {
               updateAi({ verification: payload });
             } else if (evName === 'done') {
+              if (rafId !== null) {
+                window.cancelAnimationFrame(rafId);
+                flushDelta();
+              } else if (pendingDelta) {
+                flushDelta();
+              }
               updateAi({
                 streaming: false,
                 statusText: '',
@@ -887,8 +966,8 @@ export function App() {
 
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden bg-white">
-      {/* Bespoke Editorial Window Toolbar (48px) */}
-      <header className="safe-top relative z-30 flex min-h-[48px] shrink-0 items-center justify-between gap-1.5 border-b border-black/[0.075] bg-white/95 px-2.5 py-1 backdrop-blur-xl sm:gap-2 sm:px-4">
+      {/* Bespoke Editorial Window Toolbar (48px — crisp solid surface, zero GPU blur lag) */}
+      <header className="safe-top relative z-30 flex min-h-[48px] shrink-0 items-center justify-between gap-1.5 border-b border-black/[0.075] bg-white px-2.5 py-1 sm:gap-2 sm:px-4">
         {/* Left: Sidebar Toggle + Minimal Brand + Workspace Switcher + Notebook */}
         <div className="flex min-w-0 shrink-0 items-center gap-1.5 sm:gap-2 lg:flex-1">
           {workspace === 'qa' && (
@@ -1049,7 +1128,7 @@ export function App() {
               >
                 <Search className="h-3.5 w-3.5" />
                 <span className="hidden xl:inline">검색</span>
-                <kbd className="hidden rounded border border-black/[0.1] bg-[#f7f7f5] px-1 text-[10px] text-[#8a8a8e] xl:inline">
+                <kbd className="hidden rounded border border-black/[0.1] bg-[#f7f7f5] px-1 text-[10px] text-[#8a8a8e] 2xl:inline">
                   Ctrl K
                 </kbd>
               </button>
@@ -1069,6 +1148,17 @@ export function App() {
                   </span>
                 )}
               </button>
+
+              <button
+                type="button"
+                onClick={() => setAdminModalTab('profile')}
+                title="서식 자동 기입용 내 기본 정보 설정"
+                aria-label="내 기본 정보"
+                className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
+              >
+                <UserCheck className="h-3.5 w-3.5 text-[#0f4c81]" />
+                <span className="hidden md:inline">{profileName || '내 정보'}</span>
+              </button>
             </>
           )}
 
@@ -1087,10 +1177,20 @@ export function App() {
             onClick={() => setShowFeedbackModal(true)}
             title="버그·불편·개선사항 제작자에게 제보"
             aria-label="버그 및 개선사항 제보"
-            className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
+            className="chip-nowrap hidden items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:inline-flex"
           >
             <Flag className="h-3.5 w-3.5" />
             <span className="hidden md:inline">제보</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={toggleQuickDarkMode}
+            title={isDark ? '라이트 모드로 전환' : '다크 모드로 전환'}
+            aria-label="다크 모드 전환"
+            className="rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+          >
+            {isDark ? <Sun className="h-4 w-4 text-amber-400" /> : <Moon className="h-4 w-4" />}
           </button>
 
           {!isOfflineMode && (
@@ -1194,17 +1294,25 @@ export function App() {
 
       {/* Main Workspace: Either Q&A 3-Surface Studio OR Administrative Standardization Studio */}
       {workspace === 'std' ? (
-        <StandardizationWorkspace
-          isAdmin={isAdmin}
-          currentOwnerId={auth.owner_id || ''}
-          qaDocuments={documents}
-          activeNotebookId={activeNbId}
-          groups={groups}
-          refreshTick={stdRefreshTick}
-          initialBoardId={stdInitialBoardId}
-          onOpenGroups={() => setShowGroupsModal(true)}
-          onQaDocumentsUpdated={() => void loadNotebooks(activeNbId, false)}
-        />
+        <Suspense
+          fallback={
+            <div className="flex flex-1 items-center justify-center bg-white text-xs text-[#71717a]">
+              행정 표준화실 불러오는 중...
+            </div>
+          }
+        >
+          <StandardizationWorkspace
+            isAdmin={isAdmin}
+            currentOwnerId={auth.owner_id || ''}
+            qaDocuments={documents}
+            activeNotebookId={activeNbId}
+            groups={groups}
+            refreshTick={stdRefreshTick}
+            initialBoardId={stdInitialBoardId}
+            onOpenGroups={() => setShowGroupsModal(true)}
+            onQaDocumentsUpdated={() => void loadNotebooks(activeNbId, false)}
+          />
+        </Suspense>
       ) : (
         <>
       <main className="flex min-h-0 flex-1 overflow-hidden">
@@ -1292,8 +1400,6 @@ export function App() {
               forms={forms}
               onOpenViewer={(docId, pageNo) => setViewerTarget({ docId, pageNo })}
               onOpenAutofill={(form) => setAutofillTarget(form)}
-              onOpenProfile={!isOfflineMode ? () => setAdminModalTab('profile') : undefined}
-              onCollapse={toggleInspector}
             />
           </aside>
         )}
@@ -1303,7 +1409,7 @@ export function App() {
       <nav
         className={`safe-bottom relative z-10 grid min-h-14 shrink-0 ${
           disableFormsPanel ? 'grid-cols-2' : 'grid-cols-3'
-        } border-t border-black/[0.075] bg-white/95 backdrop-blur-lg lg:hidden`}
+        } border-t border-black/[0.075] bg-white lg:hidden`}
       >
         <button
           type="button"
@@ -1341,139 +1447,152 @@ export function App() {
         </>
       )}
 
-      {viewerTarget && (
-        <PageViewerModal
-          docId={viewerTarget.docId}
-          initialPage={viewerTarget.pageNo}
-          highlightText={viewerTarget.highlightText}
-          offlineBundle={offlineBundle}
-          isOfflineMode={isOfflineMode}
-          onClose={() => setViewerTarget(null)}
-        />
-      )}
+      <Suspense fallback={null}>
+        {viewerTarget && (
+          <PageViewerModal
+            docId={viewerTarget.docId}
+            initialPage={viewerTarget.pageNo}
+            highlightText={viewerTarget.highlightText}
+            offlineBundle={offlineBundle}
+            isOfflineMode={isOfflineMode}
+            onClose={() => setViewerTarget(null)}
+          />
+        )}
 
-      {showLibraryModal && (
-        <LibraryModal
-          notebookId={activeNbId}
-          documents={documents}
-          shelf={shelf}
-          shelfDocIds={shelfDocIds}
-          isAdmin={isAdmin}
-          onToggleUserPin={handleToggleUserPin}
-          onToggleShelfLoad={handleToggleShelfLoad}
-          onBatchLoadToShelf={handleBatchLoadToShelf}
-          onOpenViewer={(docId, pageNo) => setViewerTarget({ docId, pageNo })}
-          onRefresh={() => void loadNotebooks(activeNbId, false)}
-          onClose={() => setShowLibraryModal(false)}
-        />
-      )}
+        {showLibraryModal && (
+          <LibraryModal
+            notebookId={activeNbId}
+            documents={documents}
+            shelf={shelf}
+            shelfDocIds={shelfDocIds}
+            isAdmin={isAdmin}
+            onToggleUserPin={handleToggleUserPin}
+            onToggleShelfLoad={handleToggleShelfLoad}
+            onBatchLoadToShelf={handleBatchLoadToShelf}
+            onOpenViewer={(docId, pageNo) => setViewerTarget({ docId, pageNo })}
+            onRefresh={() => void loadNotebooks(activeNbId, false)}
+            onClose={() => setShowLibraryModal(false)}
+          />
+        )}
 
-      {showGroupsModal && (
-        <GroupsModal
-          isAdmin={isAdmin}
-          currentOwnerId={auth.owner_id || ''}
-          onGroupsChanged={() => {
-            void loadGroups();
-            void refreshSessions(activeNbId);
-            setStdRefreshTick((t) => t + 1);
-          }}
-          onIdentityRecovered={() => {
-            void checkAuth();
-            void loadGroups();
-            void refreshSessions(activeNbId);
-            setStdRefreshTick((t) => t + 1);
-          }}
-          onClose={() => setShowGroupsModal(false)}
-        />
-      )}
+        {showGroupsModal && (
+          <GroupsModal
+            isAdmin={isAdmin}
+            currentOwnerId={auth.owner_id || ''}
+            onGroupsChanged={() => {
+              void loadGroups();
+              void refreshSessions(activeNbId);
+              setStdRefreshTick((t) => t + 1);
+            }}
+            onIdentityRecovered={() => {
+              void checkAuth();
+              void loadGroups();
+              void refreshSessions(activeNbId);
+              setStdRefreshTick((t) => t + 1);
+            }}
+            onClose={() => setShowGroupsModal(false)}
+          />
+        )}
 
-      {showCommandPalette && (
-        <CommandPaletteModal
-          notebookId={activeNbId}
-          onSelectDocument={(doc) => {
-            if (!shelfDocIds.has(doc.id)) {
-              handleToggleShelfLoad(doc.id);
-            } else if (!selectedDocIds.includes(doc.id)) {
-              setSelectedDocIds((prev) => [...prev, doc.id]);
-            }
-            setWorkspace('qa');
-            setViewerTarget({ docId: doc.id, pageNo: 1 });
-          }}
-          onSelectForm={(form) => {
-            setWorkspace('qa');
-            setAutofillTarget(form);
-          }}
-          onSelectSession={(sess) => {
-            setWorkspace('qa');
-            void loadSessionMessages(sess.id, activeNbId);
-          }}
-          onSelectBoard={(board) => {
-            setStdInitialBoardId(board.id);
-            setWorkspace('std');
-          }}
-          onQuickAction={(action) => {
-            if (action === 'new_chat') {
+        {showCommandPalette && (
+          <CommandPaletteModal
+            notebookId={activeNbId}
+            onSelectDocument={(doc) => {
+              if (!shelfDocIds.has(doc.id)) {
+                handleToggleShelfLoad(doc.id);
+              } else if (!selectedDocIds.includes(doc.id)) {
+                setSelectedDocIds((prev) => [...prev, doc.id]);
+              }
               setWorkspace('qa');
-              handleNewChat();
-            } else if (action === 'library') {
+              setViewerTarget({ docId: doc.id, pageNo: 1 });
+            }}
+            onSelectForm={(form) => {
               setWorkspace('qa');
-              setShowLibraryModal(true);
-            } else if (action === 'groups') {
-              setShowGroupsModal(true);
-            } else if (action === 'std') {
+              setAutofillTarget(form);
+            }}
+            onSelectSession={(sess) => {
+              setWorkspace('qa');
+              void loadSessionMessages(sess.id, activeNbId);
+            }}
+            onSelectBoard={(board) => {
+              setStdInitialBoardId(board.id);
               setWorkspace('std');
+            }}
+            onQuickAction={(action) => {
+              if (action === 'new_chat') {
+                setWorkspace('qa');
+                handleNewChat();
+              } else if (action === 'library') {
+                setWorkspace('qa');
+                setShowLibraryModal(true);
+              } else if (action === 'groups') {
+                setShowGroupsModal(true);
+              } else if (action === 'std') {
+                setWorkspace('std');
+              }
+            }}
+            onClose={() => setShowCommandPalette(false)}
+          />
+        )}
+
+        {autofillTarget && (
+          <AutofillModal
+            form={autofillTarget}
+            onClose={() => {
+              setAutofillTarget(null);
+              setProfileName(loadUserProfile().name || '');
+            }}
+          />
+        )}
+
+        {showFeedbackModal && (
+          <FeedbackModal
+            contextInfo={`노트북:${activeNbId} | 모드:${mode} | 선택문서:${selectedDocIds.length}/${documents.length}`}
+            isOfflineMode={isOfflineMode}
+            onClose={() => setShowFeedbackModal(false)}
+          />
+        )}
+
+        {showUpdateModal && updateInfo && (
+          <UpdateModal
+            info={updateInfo}
+            isAdmin={isAdmin}
+            onSkipped={(ver) => {
+              setLocalSkippedVer(ver);
+              try {
+                localStorage.setItem('church_search_skipped_ver', ver);
+              } catch {
+                // ignore
+              }
+            }}
+            onClose={() => setShowUpdateModal(false)}
+          />
+        )}
+
+        {adminModalTab && (
+          <AdminModal
+            isAdmin={isAdmin}
+            initialTab={adminModalTab}
+            activeNotebook={activeNotebook}
+            notebooks={notebooks}
+            forms={forms}
+            offlineSyncedAt={offlineSyncedAt}
+            onOfflineSynced={setOfflineSyncedAt}
+            disableFormsPanel={disableFormsPanel}
+            onDisableFormsPanelChange={handleDisableFormsPanel}
+            themeMode={themeMode}
+            onThemeModeChange={handleThemeModeChange}
+            onNotebooksChanged={(sel) => void loadNotebooks(sel, false)}
+            onPinSecurityChanged={(isDef) =>
+              setAuth((prev) => (prev ? { ...prev, is_default_pin: isDef } : prev))
             }
-          }}
-          onClose={() => setShowCommandPalette(false)}
-        />
-      )}
-
-      {autofillTarget && (
-        <AutofillModal form={autofillTarget} onClose={() => setAutofillTarget(null)} />
-      )}
-
-      {showFeedbackModal && (
-        <FeedbackModal
-          contextInfo={`노트북:${activeNbId} | 모드:${mode} | 선택문서:${selectedDocIds.length}/${documents.length}`}
-          isOfflineMode={isOfflineMode}
-          onClose={() => setShowFeedbackModal(false)}
-        />
-      )}
-
-      {showUpdateModal && updateInfo && (
-        <UpdateModal
-          info={updateInfo}
-          isAdmin={isAdmin}
-          onSkipped={(ver) => {
-            setLocalSkippedVer(ver);
-            try {
-              localStorage.setItem('church_search_skipped_ver', ver);
-            } catch {
-              // ignore
-            }
-          }}
-          onClose={() => setShowUpdateModal(false)}
-        />
-      )}
-
-      {adminModalTab && (
-        <AdminModal
-          isAdmin={isAdmin}
-          initialTab={adminModalTab}
-          activeNotebook={activeNotebook}
-          notebooks={notebooks}
-          forms={forms}
-          offlineSyncedAt={offlineSyncedAt}
-          onOfflineSynced={setOfflineSyncedAt}
-          disableFormsPanel={disableFormsPanel}
-          onDisableFormsPanelChange={handleDisableFormsPanel}
-          onNotebooksChanged={(sel) => void loadNotebooks(sel, false)}
-          onPinSecurityChanged={(isDef) =>
-            setAuth((prev) => (prev ? { ...prev, is_default_pin: isDef } : prev))
-          }
-          onClose={() => setAdminModalTab(null)}
-        />
-      )}
+            onClose={() => {
+              setAdminModalTab(null);
+              setProfileName(loadUserProfile().name || '');
+            }}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }

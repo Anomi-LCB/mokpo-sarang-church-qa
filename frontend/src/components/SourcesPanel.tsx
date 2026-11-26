@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { memo, useMemo, useRef, useState } from 'react';
 import {
   Check,
   ChevronRight,
@@ -66,7 +66,7 @@ function formatShortTime(iso: string): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-export const SourcesPanel: React.FC<Props> = ({
+export const SourcesPanel: React.FC<Props> = memo(({
   notebookId,
   allDocumentCount,
   pinnedDocs,
@@ -728,4 +728,5 @@ export const SourcesPanel: React.FC<Props> = ({
       )}
     </div>
   );
-};
+});
+SourcesPanel.displayName = 'SourcesPanel';

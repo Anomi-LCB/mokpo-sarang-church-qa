@@ -187,8 +187,8 @@ def main() -> None:
             audit_geometry(page, "Mobile-412x915-Forms")
             page.screenshot(path=str(SHOT_DIR / "audit_mobile_forms.png"))
 
-            # Wait briefly for silent IndexedDB offline sync, then go 100% OFFLINE (Airplane Mode)
-            page.wait_for_timeout(1200)
+            # Wait for deferred background offline sync (4.2s) before flipping to 100% OFFLINE
+            page.wait_for_timeout(4600)
             m_ctx.set_offline(True)
             page.click('nav button:has-text("질문")')
             page.wait_for_timeout(250)
@@ -198,6 +198,13 @@ def main() -> None:
             page.wait_for_timeout(300)
             audit_geometry(page, "Mobile-412x915-OfflinePWA")
             page.screenshot(path=str(SHOT_DIR / "audit_mobile_offline.png"))
+
+            # Verify Mobile Dark Mode toggle cleanly with zero overlaps
+            page.click('header button[aria-label="다크 모드 전환"]')
+            page.wait_for_timeout(200)
+            assert page.evaluate("() => document.documentElement.classList.contains('dark')"), "Mobile dark mode did not activate!"
+            audit_geometry(page, "Mobile-412x915-DarkMode")
+            page.screenshot(path=str(SHOT_DIR / "audit_mobile_dark.png"))
             m_ctx.set_offline(False)
             m_ctx.close()
 
@@ -322,14 +329,30 @@ def main() -> None:
             dpage.wait_for_timeout(150)
             assert dpage.locator('aside[data-panel="sidebar"]').is_visible()
 
-            # Verify Right Inspector collapse/expand via header button & toolbar button
+            # Verify v3.1: redundant PanelRightClose inside inspector is REMOVED & '내 정보' moved UP into top header!
+            assert dpage.locator('aside[data-panel="inspector"] button[aria-label="서식 창 접기"]').count() == 0, "Redundant inspector close button should be removed!"
+            assert dpage.locator('header button[aria-label="내 기본 정보"]').is_visible(), "'내 정보' button should be in top header!"
+
+            # Verify Right Inspector collapse/expand cleanly via top toolbar button
             assert dpage.locator('aside[data-panel="inspector"]').is_visible()
-            dpage.click('aside[data-panel="inspector"] button[aria-label="서식 창 접기"]')
+            dpage.click('header button[aria-label="오른쪽 서식 창 접기"]')
             dpage.wait_for_timeout(150)
             assert not dpage.locator('aside[data-panel="inspector"]').is_visible()
             dpage.click('header button[aria-label="오른쪽 서식 창 열기"]')
             dpage.wait_for_timeout(150)
             assert dpage.locator('aside[data-panel="inspector"]').is_visible()
+
+            # Verify v3.1 Editorial Dark Mode on Desktop (1440x900)
+            dpage.click('header button[aria-label="다크 모드 전환"]')
+            dpage.wait_for_timeout(220)
+            dark_bg = dpage.evaluate("() => getComputedStyle(document.body).backgroundColor")
+            assert dpage.evaluate("() => document.documentElement.classList.contains('dark')")
+            print(f"[AUDIT Desktop-DarkMode] body_bg={dark_bg}", flush=True)
+            audit_geometry(dpage, "Desktop-1440x900-DarkMode")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_dark.png"))
+            # Switch back to Light Mode for remaining audits
+            dpage.click('header button[aria-label="다크 모드 전환"]')
+            dpage.wait_for_timeout(180)
 
             # Open Connect / QR modal & verify QR images (External, APK install, and APK 1-scan auto-connect)
             dpage.click('header button[title="모바일 QR 연결 및 APK"]')

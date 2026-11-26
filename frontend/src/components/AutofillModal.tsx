@@ -528,7 +528,10 @@ export const AutofillModal: React.FC<Props> = ({ form, onClose }) => {
             </div>
 
             {previewTab === 'draft' ? (
-              <div className="mx-auto w-full max-w-[560px] rounded-lg border border-black/[0.1] bg-white px-6 py-8 shadow-[0_8px_28px_rgba(0,0,0,0.06)] sm:px-9 sm:py-10">
+              <div
+                data-paper="a4"
+                className="mx-auto w-full max-w-[560px] rounded-lg border border-black/[0.1] bg-white px-6 py-8 shadow-[0_8px_28px_rgba(0,0,0,0.08)] sm:px-9 sm:py-10"
+              >
                 {/* Official Korean Document Sheet */}
                 <div className="border-b-2 border-[#18181b] pb-3 text-center">
                   <input

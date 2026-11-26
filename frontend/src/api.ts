@@ -293,6 +293,26 @@ export const api = {
     reqJson<Omit<OfflineBundle, 'synced_at'>>(
       `/api/notebooks/${encodeURIComponent(notebookId)}/offline-bundle`
     ),
+  getOfflineBundleConditional: async (
+    notebookId: string,
+    etag = ''
+  ): Promise<
+    | { notModified: true; etag: string }
+    | { notModified: false; etag: string; bundle: Omit<OfflineBundle, 'synced_at'> }
+  > => {
+    const hdrs: Record<string, string> = authHeaders();
+    if (etag) hdrs['If-None-Match'] = etag;
+    const res = await fetch(`/api/notebooks/${encodeURIComponent(notebookId)}/offline-bundle`, {
+      credentials: 'include',
+      headers: hdrs,
+    });
+    if (res.status === 304) {
+      return { notModified: true, etag: res.headers.get('ETag') || etag };
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const bundle = (await res.json()) as Omit<OfflineBundle, 'synced_at'>;
+    return { notModified: false, etag: res.headers.get('ETag') || '', bundle };
+  },
   uploadDocuments: (notebookId: string, files: File[], category = '일반 자료', priority = 50) => {
     const fd = new FormData();
     files.forEach((f) => fd.append('files', f));

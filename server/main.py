@@ -259,6 +259,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         app.state.events = RealtimeEventBus()
         app.state.discovery = discovery
         app.state.jobs = {}
+        app.state.offline_bundle_cache = {}
         try:
             yield
         finally:
@@ -279,12 +280,30 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
     )
 
     @app.middleware("http")
-    async def security_headers_middleware(request: Request, call_next):
+    async def security_and_perf_middleware(request: Request, call_next):
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        path = request.url.path
+        if path.startswith("/assets/"):
+            response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+        # Fast transparent GZip for large JSON payloads (never buffers SSE streams)
+        ct = (response.headers.get("content-type") or "").lower()
+        if (
+            "application/json" in ct
+            and "content-encoding" not in response.headers
+            and "gzip" in (request.headers.get("accept-encoding") or "").lower()
+            and hasattr(response, "body")
+            and isinstance(response.body, (bytes, bytearray))
+            and len(response.body) >= 1536
+        ):
+            gz = gzip.compress(bytes(response.body), compresslevel=4)
+            response.body = gz
+            response.headers["Content-Encoding"] = "gzip"
+            response.headers["Content-Length"] = str(len(gz))
+            response.headers["Vary"] = "Accept-Encoding"
         return response
 
     # ---- Health ----
@@ -454,18 +473,45 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
     @app.get("/api/notebooks/{notebook_id}/offline-bundle")
     def get_offline_bundle(notebook_id: str, request: Request, _: AuthUser = Depends(require_user)) -> Response:
         db: Database = request.app.state.db
-        bundle = db.export_offline_bundle(notebook_id)
-        if not bundle:
-            raise HTTPException(status_code=404, detail="노트북을 찾을 수 없습니다.")
-        raw = json.dumps(bundle, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # Fast 0.2ms fingerprint for ETag + in-memory gzip cache (avoids repeated 919p JSON serialization)
+        with db.connect() as conn:
+            nb_row = conn.execute("SELECT updated_at FROM notebooks WHERE id = ?", (notebook_id,)).fetchone()
+            if not nb_row:
+                raise HTTPException(status_code=404, detail="노트북을 찾을 수 없습니다.")
+            d_stat = conn.execute(
+                "SELECT COUNT(*) AS cnt, COALESCE(SUM(total_chars), 0) AS chars, COALESCE(MAX(created_at), '') AS mx "
+                "FROM documents WHERE notebook_id = ? AND status = 'ready'",
+                (notebook_id,),
+            ).fetchone()
+            f_stat = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM forms_catalog WHERE notebook_id = ?",
+                (notebook_id,),
+            ).fetchone()
+        etag = f'W/"nb-{notebook_id}-{d_stat["cnt"]}-{d_stat["chars"]}-{d_stat["mx"]}-{f_stat["cnt"]}"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "private, max-age=60"})
+
+        cache: dict[str, tuple[str, bytes, bytes]] = getattr(request.app.state, "offline_bundle_cache", {})
+        cached = cache.get(notebook_id)
+        if cached and cached[0] == etag:
+            raw, gz = cached[1], cached[2]
+        else:
+            bundle = db.export_offline_bundle(notebook_id)
+            if not bundle:
+                raise HTTPException(status_code=404, detail="노트북을 찾을 수 없습니다.")
+            raw = json.dumps(bundle, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            gz = gzip.compress(raw, compresslevel=5)
+            cache[notebook_id] = (etag, raw, gz)
+            request.app.state.offline_bundle_cache = cache
+
         accept_enc = (request.headers.get("accept-encoding") or "").lower()
         if "gzip" in accept_enc:
-            gz = gzip.compress(raw, compresslevel=6)
             return Response(
                 content=gz,
                 media_type="application/json; charset=utf-8",
                 headers={
                     "Content-Encoding": "gzip",
+                    "ETag": etag,
                     "Cache-Control": "private, max-age=60",
                     "Vary": "Accept-Encoding",
                 },
@@ -473,7 +519,7 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         return Response(
             content=raw,
             media_type="application/json; charset=utf-8",
-            headers={"Cache-Control": "private, max-age=60"},
+            headers={"ETag": etag, "Cache-Control": "private, max-age=60"},
         )
 
     @app.post("/api/notebooks/{notebook_id}/documents/upload")

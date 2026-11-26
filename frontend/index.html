@@ -11,6 +11,18 @@
     <link rel="icon" type="image/png" href="/icon-192.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <title>목포사랑의교회 행정Q&amp;A</title>
+    <script>
+      (function () {
+        try {
+          var m = localStorage.getItem('church_search_theme_mode') || 'light';
+          var d = m === 'dark' || (m === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          if (d) {
+            document.documentElement.classList.add('dark');
+            document.documentElement.style.colorScheme = 'dark';
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body class="bg-[#f7f7f5] text-[#18181b] antialiased">
     <div id="root"></div>
