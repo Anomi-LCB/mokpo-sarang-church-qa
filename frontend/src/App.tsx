@@ -13,7 +13,6 @@ import {
   PanelRight,
   PlusSquare,
   QrCode,
-  RefreshCw,
   Search,
   Server,
   Share,
@@ -122,7 +121,7 @@ const ToolbarTip: React.FC<{
     {children}
     <div
       role="tooltip"
-      className={`pointer-events-none invisible absolute top-full z-50 mt-1.5 whitespace-nowrap rounded-lg border border-black/[0.09] bg-white px-2.5 py-1 text-[11px] font-medium text-[#18181b] opacity-0 shadow-[0_6px_18px_rgba(0,0,0,0.12)] transition duration-120 group-hover/tip:visible group-hover/tip:opacity-100 ${
+      className={`pointer-events-none invisible absolute top-full z-50 mt-1.5 whitespace-nowrap rounded-lg border border-black/[0.08] bg-[#18181b] px-2.5 py-1 text-[11px] font-medium text-white opacity-0 shadow-[0_6px_18px_rgba(0,0,0,0.18)] transition duration-120 group-hover/tip:visible group-hover/tip:opacity-100 group-focus-within/tip:visible group-focus-within/tip:opacity-100 ${
         align === 'left' ? 'left-0' : align === 'right' ? 'right-0' : 'left-1/2 -translate-x-1/2'
       }`}
     >
@@ -998,7 +997,6 @@ export function App() {
               <button
                 type="button"
                 onClick={toggleSidebar}
-                title={showSidebar ? '왼쪽 자료 패널 접기' : '왼쪽 자료 패널 열기'}
                 aria-label={showSidebar ? '왼쪽 자료 패널 접기' : '왼쪽 자료 패널 열기'}
                 className={`inline-flex rounded-md p-1.5 transition ${
                   showSidebar ? 'bg-black/[0.06] text-[#18181b]' : 'text-[#71717a] hover:bg-black/[0.045] hover:text-[#18181b]'
@@ -1009,9 +1007,14 @@ export function App() {
             </ToolbarTip>
           )}
 
-          <div className="hidden h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#18181b] text-white sm:flex">
-            <BookOpen className="h-3.5 w-3.5" strokeWidth={2} />
-          </div>
+          <ToolbarTip label="목포사랑의교회 행정Q&A" align="left" className="hidden sm:inline-flex">
+            <div
+              aria-label="목포사랑의교회 행정Q&A"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#18181b] text-white"
+            >
+              <BookOpen className="h-3.5 w-3.5" strokeWidth={2} />
+            </div>
+          </ToolbarTip>
 
           {/* 2-Workspace Primary Switcher: 행정 Q&A | 표준화실 */}
           {!isOfflineMode && (
@@ -1020,7 +1023,6 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => setWorkspace('qa')}
-                  title="행정 Q&A — 법규·행정 원문 검색 및 질문"
                   className={`chip-nowrap rounded-[6px] px-2 py-1 text-[11.5px] font-semibold transition ${
                     workspace === 'qa'
                       ? 'bg-white text-[#18181b] shadow-[0_1px_2px_rgba(0,0,0,0.07)]'
@@ -1034,7 +1036,6 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => setWorkspace('std')}
-                  title="표준화실 — 부서 자료 수집 · 투표 · PDF 편찬"
                   className={`chip-nowrap inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-[11.5px] font-semibold transition ${
                     workspace === 'std'
                       ? 'bg-white text-[#0f4c81] shadow-[0_1px_2px_rgba(0,0,0,0.07)]'
@@ -1048,43 +1049,40 @@ export function App() {
             </div>
           )}
 
-          {/* Group & Feedback moved right next to 표준화실 on the left */}
+          {/* Group & Feedback moved right next to 표준화실 on the left (icon-only + hover name tooltip) */}
           {!isOfflineMode && (
             <div className="flex shrink-0 items-center gap-0.5">
-              <ToolbarTip label="협업 그룹 · 초대 코드 · 공동 대화 관리" align="left">
+              <ToolbarTip
+                label={`그룹${groups.length > 0 ? ` (${groups.length})` : ''} · 협업·초대·공동 대화`}
+                align="left"
+              >
                 <button
                   type="button"
                   onClick={() => setShowGroupsModal(true)}
-                  title="협업 그룹 · 초대 · 개설 권한 관리"
                   aria-label="그룹 관리"
-                  className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
+                  className="relative inline-flex items-center justify-center rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                 >
-                  <Users className="h-3.5 w-3.5" />
-                  <span className="hidden md:inline">그룹</span>
+                  <Users className="h-4 w-4" />
                   {groups.length > 0 && (
-                    <span className="hidden rounded-full bg-[#0f4c81]/12 px-1.5 py-0.2 text-[10px] font-bold text-[#0f4c81] sm:inline">
-                      {groups.length}
-                    </span>
+                    <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-[#0f4c81]" aria-hidden="true" />
                   )}
                 </button>
               </ToolbarTip>
 
-              <ToolbarTip label="오류 · 불편 · 개선사항 제작자에게 제보" align="left" className="hidden sm:inline-flex">
+              <ToolbarTip label="제보 · 오류 및 개선사항 전달" align="left" className="hidden sm:inline-flex">
                 <button
                   type="button"
                   onClick={() => setShowFeedbackModal(true)}
-                  title="오류 · 불편 · 개선사항 제작자에게 제보"
                   aria-label="버그 및 개선사항 제보"
-                  className="chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                  className="inline-flex items-center justify-center rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                 >
-                  <Flag className="h-3.5 w-3.5" />
-                  <span className="hidden md:inline">제보</span>
+                  <Flag className="h-4 w-4" />
                 </button>
               </ToolbarTip>
             </div>
           )}
 
-          {workspace === 'qa' && (
+          {workspace === 'qa' && notebooks.length > 1 && (
             <select
               aria-label="노트북 선택"
               title="검색할 노트북 선택"
@@ -1145,44 +1143,40 @@ export function App() {
           )}
         </div>
 
-        {/* Right: Quiet Studio Toolbar Actions (Each icon shows a crisp hover tooltip) */}
+        {/* Right: Quiet Studio Toolbar Actions (Icon-only, crisp hover name tooltip) */}
         <div className="flex shrink-0 items-center justify-end gap-0.5 sm:gap-1 lg:flex-1">
           {showUpdateBadge && updateInfo?.latest && (
-            <ToolbarTip label={`새 버전 v${updateInfo.latest.version} 업데이트 내용 보기`} align="right">
+            <ToolbarTip label={`업데이트 v${updateInfo.latest.version} · 새 버전 내용 보기`} align="right">
               <button
                 type="button"
                 onClick={() => setShowUpdateModal(true)}
-                title={`새 버전 v${updateInfo.latest.version} 업데이트 내용 보기`}
-                className="chip-nowrap inline-flex items-center gap-1 rounded-full bg-[#0f4c81] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#0c3d68]"
+                aria-label={`새 버전 v${updateInfo.latest.version} 업데이트`}
+                className="relative inline-flex items-center justify-center rounded-md bg-[#0f4c81]/10 p-1.5 text-[#0f4c81] transition hover:bg-[#0f4c81]/18"
               >
-                <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
-                <span className="hidden sm:inline">업데이트</span>
-                <span>v{updateInfo.latest.version}</span>
+                <ArrowUpCircle className="h-4 w-4 shrink-0" />
+                <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-[#0f4c81]" aria-hidden="true" />
               </button>
             </ToolbarTip>
           )}
 
           {isOfflineMode && (
-            <ToolbarTip label="오프라인 모드 — 눌러서 서버 재연결 시도" align="right">
+            <ToolbarTip label="오프라인 모드 · 눌러서 서버 재연결 시도" align="right">
               <button
                 type="button"
                 onClick={() => void checkAuth()}
-                title="오프라인 모드 동작 중 — 눌러서 서버 재연결 시도"
-                className="chip-nowrap inline-flex items-center gap-1 rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-semibold text-amber-900 ring-1 ring-amber-300/80 transition hover:bg-amber-200"
+                aria-label="오프라인 모드 재연결"
+                className="inline-flex items-center justify-center rounded-md bg-amber-100 p-1.5 text-amber-800 ring-1 ring-amber-300/80 transition hover:bg-amber-200"
               >
-                <WifiOff className="h-3 w-3 shrink-0" />
-                <span>오프라인</span>
-                <RefreshCw className="h-3 w-3 shrink-0" />
+                <WifiOff className="h-4 w-4 shrink-0" />
               </button>
             </ToolbarTip>
           )}
 
           {androidBridge?.openServerSettings && (
-            <ToolbarTip label="연결할 교회 PC 서버 주소 변경" align="right">
+            <ToolbarTip label="서버 주소 변경" align="right">
               <button
                 type="button"
                 onClick={() => androidBridge.openServerSettings?.()}
-                title="서버 주소 변경"
                 aria-label="서버 주소 변경"
                 className="rounded-md p-1.5 text-[#0f4c81] transition hover:bg-black/[0.05]"
               >
@@ -1193,42 +1187,37 @@ export function App() {
 
           {!isOfflineMode && (
             <>
-              <ToolbarTip label="문서 · 서식 · 대화 빠른 검색 (Ctrl+K)" align="right">
+              <ToolbarTip label="빠른 검색 (Ctrl+K)" align="right">
                 <button
                   type="button"
                   onClick={() => setShowCommandPalette(true)}
-                  title="전체 빠른 검색 (Ctrl+K)"
                   aria-label="전체 빠른 검색"
-                  className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
+                  className="inline-flex items-center justify-center rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                 >
-                  <Search className="h-3.5 w-3.5" />
-                  <span className="hidden xl:inline">검색</span>
-                  <kbd className="hidden rounded border border-black/[0.1] bg-[#f7f7f5] px-1 text-[10px] text-[#8a8a8e] 2xl:inline">
-                    Ctrl K
-                  </kbd>
+                  <Search className="h-4 w-4" />
                 </button>
               </ToolbarTip>
 
-              <ToolbarTip label="서식 자동 기입용 내 기본 정보 설정" align="right">
+              <ToolbarTip
+                label={profileName ? `내 기본 정보 (${profileName})` : '내 기본 정보 · 서식 자동 기입'}
+                align="right"
+              >
                 <button
                   type="button"
                   onClick={() => setAdminModalTab('profile')}
-                  title="서식 자동 기입용 내 기본 정보 설정"
                   aria-label="내 기본 정보"
-                  className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
+                  className="inline-flex items-center justify-center rounded-md p-1.5 text-[#0f4c81] transition hover:bg-black/[0.05]"
                 >
-                  <UserCheck className="h-3.5 w-3.5 text-[#0f4c81]" />
-                  <span className="hidden md:inline">{profileName || '내 정보'}</span>
+                  <UserCheck className="h-4 w-4" />
                 </button>
               </ToolbarTip>
             </>
           )}
 
-          <ToolbarTip label={isDark ? '밝은 라이트 모드로 전환' : '어두운 다크 모드로 전환'} align="right">
+          <ToolbarTip label={isDark ? '라이트 모드로 전환' : '다크 모드로 전환'} align="right">
             <button
               type="button"
               onClick={toggleQuickDarkMode}
-              title={isDark ? '라이트 모드로 전환' : '다크 모드로 전환'}
               aria-label="다크 모드 전환"
               className="rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
             >
@@ -1238,34 +1227,30 @@ export function App() {
 
           {!isOfflineMode && (
             <>
-              <ToolbarTip label="스마트폰 QR 접속 · 안드로이드 앱 설치" align="right">
+              <ToolbarTip label="모바일 QR 연결 · 앱 설치" align="right">
                 <button
                   type="button"
                   onClick={() => setAdminModalTab('connect')}
-                  title="모바일 QR 연결 및 APK"
                   aria-label="모바일 QR 연결 및 APK"
-                  className="chip-nowrap inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
+                  className="inline-flex items-center justify-center rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                 >
                   <QrCode className="h-4 w-4" />
-                  <span className="hidden sm:inline">연결</span>
                 </button>
               </ToolbarTip>
 
               <ToolbarTip
-                label={isAdmin && auth.is_default_pin ? '환경 설정 (기본 PIN 변경 권장)' : '화면 · AI · 업데이트 · 보안 설정'}
+                label={isAdmin && auth.is_default_pin ? '환경 설정 (기본 PIN 변경 권장)' : '환경 설정'}
                 align="right"
               >
                 <button
                   type="button"
                   onClick={() => setAdminModalTab(isAdmin && auth.is_default_pin ? 'security' : 'cli')}
-                  title={isAdmin && auth.is_default_pin ? '설정 (기본 PIN 변경 권장)' : '환경 설정'}
                   aria-label="환경 설정"
-                  className="chip-nowrap relative inline-flex items-center gap-1 rounded-md p-1.5 text-xs font-medium text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b] sm:px-2"
+                  className="relative inline-flex items-center justify-center rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                 >
                   <SlidersHorizontal className="h-4 w-4" />
-                  <span className="hidden sm:inline">설정</span>
                   {isAdmin && auth.is_default_pin && (
-                    <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+                    <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
                   )}
                 </button>
               </ToolbarTip>
@@ -1281,7 +1266,6 @@ export function App() {
               <button
                 type="button"
                 onClick={toggleInspector}
-                title={showInspector ? '오른쪽 서식 창 접기' : '오른쪽 서식 창 열기'}
                 aria-label={showInspector ? '오른쪽 서식 창 접기' : '오른쪽 서식 창 열기'}
                 className={`inline-flex rounded-md p-1.5 transition ${
                   showInspector ? 'bg-black/[0.06] text-[#18181b]' : 'text-[#71717a] hover:bg-black/[0.045] hover:text-[#18181b]'
@@ -1299,7 +1283,6 @@ export function App() {
                 setIsOfflineMode(false);
                 void api.logout().then(() => setAuth({ authenticated: false }));
               }}
-              title="로그아웃"
               aria-label="로그아웃"
               className="rounded-md p-1.5 text-[#8a8a8e] transition hover:bg-red-50 hover:text-red-600"
             >

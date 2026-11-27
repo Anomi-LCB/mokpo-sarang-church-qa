@@ -320,7 +320,7 @@ def main() -> None:
             dpage.click('aside[data-panel="sidebar"] button[aria-label="자료 공간 펼치기"]')
             dpage.wait_for_timeout(180)
 
-            # Verify v4.1 Top Header: '그룹' & '제보' moved left beside '표준화실', no '새 대화' in top bar, and icon hover tooltip works!
+            # Verify v4.2.3 Top Header: ONLY '행정 Q&A', '표준화실', and 4 answer mode tabs have text; ALL other icons are icon-only with hover tooltip!
             hdr_check = dpage.evaluate(
                 """() => {
                     const hdr = document.querySelector('header');
@@ -328,16 +328,27 @@ def main() -> None:
                     const grpBtn = hdr.querySelector('button[aria-label="그룹 관리"]');
                     const rptBtn = hdr.querySelector('button[aria-label="버그 및 개선사항 제보"]');
                     const newChatBtn = Array.from(hdr.querySelectorAll('button')).find(b => b.innerText.includes('새 대화'));
+                    const allowedText = new Set(['행정 Q&A', '표준화실', '자동', '실무 정리', '원문 엄격', '적용·제안']);
+                    const strayTextButtons = Array.from(hdr.querySelectorAll('button'))
+                        .filter(b => {
+                            const st = getComputedStyle(b);
+                            if (st.display === 'none' || st.visibility === 'hidden') return false;
+                            const txt = (b.innerText || '').trim();
+                            return txt.length > 0 && !allowedText.has(txt);
+                        })
+                        .map(b => ({ label: b.getAttribute('aria-label') || '', text: (b.innerText || '').trim() }));
                     return {
                         stdRight: stdBtn ? Math.round(stdBtn.getBoundingClientRect().right) : -1,
                         grpLeft: grpBtn ? Math.round(grpBtn.getBoundingClientRect().left) : -1,
                         rptLeft: rptBtn ? Math.round(rptBtn.getBoundingClientRect().left) : -1,
                         hasTopNewChat: Boolean(newChatBtn),
+                        strayTextButtons,
                     };
                 }"""
             )
             print(f"[AUDIT TopHeader-Layout] {hdr_check}", flush=True)
             assert hdr_check["hasTopNewChat"] is False, "Top bar should not have '새 대화' button!"
+            assert len(hdr_check["strayTextButtons"]) == 0, f"Top bar icon buttons must have zero visible text: {hdr_check['strayTextButtons']}"
             assert 0 < hdr_check["grpLeft"] < 650 and hdr_check["grpLeft"] >= hdr_check["stdRight"] - 4, f"Group button not right of 표준화실: {hdr_check}"
             assert hdr_check["rptLeft"] > hdr_check["grpLeft"] and hdr_check["rptLeft"] < 700, f"Report button not next to 그룹: {hdr_check}"
 
@@ -403,7 +414,7 @@ def main() -> None:
             dpage.wait_for_timeout(180)
 
             # Open Connect / QR modal & verify accurate QR (zero dead 100.x Tailscale VPN IP in primary QR + live reachability check!)
-            dpage.click('header button[title="모바일 QR 연결 및 APK"]')
+            dpage.click('header button[aria-label="모바일 QR 연결 및 APK"]')
             dpage.wait_for_selector('img[alt="외부 접속 QR"]', timeout=8000)
             dpage.wait_for_selector('img[alt="APK 자동 연결 QR"]', timeout=8000)
             dpage.wait_for_timeout(300)
@@ -456,7 +467,7 @@ def main() -> None:
                 }"""
             )
             print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.2.2", f"Expected v4.2.2, got {eng_status}"
+            assert eng_status.get("version") == "4.2.3", f"Expected v4.2.3, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")
