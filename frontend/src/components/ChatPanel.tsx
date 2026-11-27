@@ -54,17 +54,17 @@ const DEFAULT_PROMPTS = [
 
 const MODE_LABELS: Record<string, string> = {
   auto: '자동',
-  practical: '실무 정리',
-  strict: '원문 엄격',
-  advisory: '적용·제안',
+  practical: '실무',
+  strict: '원문',
+  advisory: '제언',
   instant: '즉시 검색',
 };
 
 const MOBILE_MODE_OPTS: Array<{ id: AnswerMode; label: string; desc: string }> = [
-  { id: 'auto', label: '자동', desc: '질문 성격을 파악해 원문 엄격·실무 정리·적용 제안을 스스로 조합합니다.' },
+  { id: 'auto', label: '자동', desc: '질문 성격을 파악해 원문·실무·제언을 스스로 조합합니다.' },
   { id: 'practical', label: '실무', desc: '조항 근거를 바탕으로 절차·요건·기한을 표와 체크리스트로 정리합니다.' },
   { id: 'strict', label: '원문', desc: '규정 원문 조항만 엄격히 인용하며 추측이나 확대 해석을 배제합니다.' },
-  { id: 'advisory', label: '제안', desc: '원문 근거에 더해 실무 적용 주의점과 행정 실행안을 함께 제안합니다.' },
+  { id: 'advisory', label: '제언', desc: '원문 근거에 더해 실무 적용 주의점과 행정 실행안을 함께 제언합니다.' },
 ];
 
 const ChatComposer = memo<{

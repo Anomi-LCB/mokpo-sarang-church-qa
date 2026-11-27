@@ -328,7 +328,7 @@ def main() -> None:
                     const grpBtn = hdr.querySelector('button[aria-label="그룹 관리"]');
                     const rptBtn = hdr.querySelector('button[aria-label="버그 및 개선사항 제보"]');
                     const newChatBtn = Array.from(hdr.querySelectorAll('button')).find(b => b.innerText.includes('새 대화'));
-                    const allowedText = new Set(['행정 Q&A', '표준화실', '자동', '실무 정리', '원문 엄격', '적용·제안']);
+                    const allowedText = new Set(['행정 Q&A', '표준화실', '자동', '실무', '원문', '제언']);
                     const strayTextButtons = Array.from(hdr.querySelectorAll('button'))
                         .filter(b => {
                             const st = getComputedStyle(b);
@@ -467,7 +467,7 @@ def main() -> None:
                 }"""
             )
             print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.2.3", f"Expected v4.2.3, got {eng_status}"
+            assert eng_status.get("version") == "4.2.4", f"Expected v4.2.4, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")
