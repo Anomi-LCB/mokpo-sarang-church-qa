@@ -177,6 +177,8 @@ export const AdminModal: React.FC<Props> = ({
   const [defaultDoubleVerify, setDefaultDoubleVerify] = useState(false);
   const [defaultChatShared, setDefaultChatShared] = useState(false);
   const [auditLogEnabled, setAuditLogEnabled] = useState(true);
+  const [localAutoLogin, setLocalAutoLogin] = useState(true);
+  const [keepTrayOnClose, setKeepTrayOnClose] = useState(false);
 
   // Engine v4.0 & Local ONNX Neural Pack state
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
@@ -373,6 +375,8 @@ export const AdminModal: React.FC<Props> = ({
         default_double_verify: defaultDoubleVerify,
         default_chat_shared: defaultChatShared,
         audit_log_enabled: auditLogEnabled,
+        local_auto_login: localAutoLogin,
+        keep_tray_on_close: keepTrayOnClose,
       });
       await loadAll();
       setMsg('무료 구글 로그인 기반 Gemini CLI로 전환되었습니다!');
@@ -493,6 +497,8 @@ export const AdminModal: React.FC<Props> = ({
       setDefaultDoubleVerify(cliCfg.default_double_verify);
       setDefaultChatShared(cliCfg.default_chat_shared);
       setAuditLogEnabled(cliCfg.audit_log_enabled);
+      setLocalAutoLogin(cliCfg.local_auto_login ?? true);
+      setKeepTrayOnClose(cliCfg.keep_tray_on_close ?? false);
 
       if (upd) {
         setUpdateInfo(upd);
@@ -610,9 +616,14 @@ export const AdminModal: React.FC<Props> = ({
     setTimeout(() => setCopiedKey(''), 1800);
   };
 
-  const handleSaveSettings = async (clearKey = false) => {
+  const handleSaveSettings = async (
+    clearKey = false,
+    overrides?: { local_auto_login?: boolean; keep_tray_on_close?: boolean }
+  ) => {
     setBusyAction(true);
     setMsg('');
+    const nextLocalAuto = overrides?.local_auto_login ?? localAutoLogin;
+    const nextKeepTray = overrides?.keep_tray_on_close ?? keepTrayOnClose;
     try {
       await api.updateCliSettings({
         connection_mode: connectionMode,
@@ -629,13 +640,23 @@ export const AdminModal: React.FC<Props> = ({
         default_double_verify: defaultDoubleVerify,
         default_chat_shared: defaultChatShared,
         audit_log_enabled: auditLogEnabled,
+        local_auto_login: nextLocalAuto,
+        keep_tray_on_close: nextKeepTray,
       });
       setApiKeyInput('');
       await loadAll();
       setMsg(
         clearKey
           ? '선택된 API 키가 안전하게 삭제되었습니다.'
-          : 'AI 연결(CLI/API) 및 안정성 설정이 암호화 저장되었습니다.'
+          : overrides?.keep_tray_on_close !== undefined
+            ? nextKeepTray
+              ? '창을 닫아도 백그라운드 서버가 유지되도록 설정되었습니다 (스마트폰 연결용).'
+              : '창을 닫으면 일반 PC 프로그램처럼 깔끔하게 종료되도록 설정되었습니다.'
+            : overrides?.local_auto_login !== undefined
+              ? nextLocalAuto
+                ? '내 PC 실행 시 PIN 없이 바로 열리도록 설정되었습니다 (외부 기기는 PIN 유지).'
+                : '내 PC 실행 시에도 PIN 로그인을 요구하도록 설정되었습니다.'
+              : 'AI 연결(CLI/API) 및 실행 환경 설정이 암호화 저장되었습니다.'
       );
     } catch (err) {
       setMsg(err instanceof Error ? err.message : '저장 실패');
@@ -2156,6 +2177,33 @@ export const AdminModal: React.FC<Props> = ({
                     className="h-4 w-4 accent-[#18181b]"
                   />
                 </label>
+
+                {isAdmin && (
+                  <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-black/[0.06] pt-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <p className="text-xs font-semibold text-[#18181b]">창을 닫아도 백그라운드 유지 (스마트폰 연결 시 켜기)</p>
+                        <span className="chip-nowrap rounded-full bg-[#f0f0ee] px-2 py-0.5 text-[10px] font-semibold text-[#52525b]">
+                          {keepTrayOnClose ? '트레이 유지 중' : '개인 앱 종료 모드'}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-[#71717a]">
+                        끄면(기본값) 창 닫기(×) 시 일반 Windows 프로그램처럼 완전히 종료됩니다. 외부 스마트폰에서 계속 접속하려면 켜세요.
+                      </p>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={keepTrayOnClose}
+                      disabled={busyAction}
+                      onChange={(e) => {
+                        const next = e.target.checked;
+                        setKeepTrayOnClose(next);
+                        void handleSaveSettings(false, { keep_tray_on_close: next });
+                      }}
+                      className="h-4 w-4 shrink-0 accent-[#0f4c81]"
+                    />
+                  </label>
+                )}
               </div>
 
               {/* Active AI Engine Status Banner */}
@@ -3245,6 +3293,31 @@ export const AdminModal: React.FC<Props> = ({
               {/* Privacy & Audit Policy toggles */}
               <div className="space-y-3 rounded-xl border border-black/[0.08] p-4">
                 <label className="flex cursor-pointer items-center justify-between gap-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="text-xs font-semibold text-[#1d1d1f]">로컬 PC 실행 시 PIN 없이 바로 열기 (개인용 권장)</p>
+                      <span className="chip-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                        외부 기기는 PIN 필수
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-[#6e6e73]">
+                      켜면 내 PC에서 앱을 열 때 로그인 창 없이 즉시 진입합니다. 스마트폰·다른 PC 접속 시에는 항상 PIN이 요구됩니다.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={localAutoLogin}
+                    disabled={busyAction}
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      setLocalAutoLogin(next);
+                      void handleSaveSettings(false, { local_auto_login: next });
+                    }}
+                    className="h-4 w-4 shrink-0 accent-[#007AFF]"
+                  />
+                </label>
+
+                <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-black/[0.06] pt-3">
                   <div>
                     <p className="text-xs font-semibold text-[#1d1d1f]">새 대화 기본 공개 범위: 팀 전체 공유</p>
                     <p className="text-[11px] text-[#6e6e73]">끄면(권장) 새 대화는 본인 기기에 비공개 저장되며 필요 시 개별 공유 가능</p>

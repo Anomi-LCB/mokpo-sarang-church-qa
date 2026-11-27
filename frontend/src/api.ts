@@ -496,6 +496,8 @@ export const api = {
     default_double_verify: boolean;
     default_chat_shared: boolean;
     audit_log_enabled: boolean;
+    local_auto_login?: boolean;
+    keep_tray_on_close?: boolean;
   }) => reqJson<{ ok: boolean }>('/api/admin/cli', { method: 'PUT', body: JSON.stringify(payload) }),
   testAiConnection: (payload: {
     mode: 'api' | 'cli';

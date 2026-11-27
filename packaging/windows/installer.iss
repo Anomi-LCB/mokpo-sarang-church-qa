@@ -13,8 +13,8 @@
 [Setup]
 AppId={{8D6E4921-7C31-4F92-9A0E-C81D2B4F9102}
 AppName=목포사랑의교회 행정Q&A
-AppVersion=4.3.1
-AppVerName=목포사랑의교회 행정Q&A 4.3.1
+AppVersion=4.4.0
+AppVerName=목포사랑의교회 행정Q&A 4.4.0
 AppPublisher=목포사랑의교회 행정·법규 검색 시스템
 DefaultDirName={autopf}\목포사랑의교회 행정Q&A
 DefaultGroupName=목포사랑의교회 행정Q&A
@@ -26,7 +26,8 @@ UninstallDisplayIcon={app}\목포사랑의교회 행정Q&A.exe
 Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
@@ -40,27 +41,34 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 #endif
 
 [Types]
-Name: "full"; Description: "전체 설치 (권장 — 프로그램 + 4대 법규 기본 자료 + Tailscale 원격 연결)"
+Name: "full"; Description: "표준 설치 (권장 — 개인용 로컬 실행 프로그램 + 4대 법규 기본 자료)"
 Name: "nodata"; Description: "빈 라이브러리 설치 (기본 자료 제외 — 새 문서만 직접 올려서 사용)"
-Name: "custom"; Description: "사용자 지정 설치"; Flags: iscustom
+Name: "custom"; Description: "사용자 지정 설치 (외부 스마트폰 원격 접속 도구 포함 가능)"; Flags: iscustom
 
 [Components]
-Name: "core"; Description: "목포사랑의교회 행정Q&A 본체 (오프라인 검색 엔진 + 하이브리드 Android APK)"; Types: full nodata custom; Flags: fixed
+Name: "core"; Description: "목포사랑의교회 행정Q&A 본체 (PC 로컬 오프라인 검색 엔진 + 서식 자동작성)"; Types: full nodata custom; Flags: fixed
 Name: "churchdata"; Description: "목포사랑의교회 4대 법규·행정 기본 자료 (헌법·해설서·정관·시행세칙 919쪽 + 서식 60종)"; Types: full
-Name: "tailscale"; Description: "Tailscale 원격 연결 도구 자동 설치 (외부 스마트폰 HTTPS 접속용 · 미설치 시 오프라인 설치)"; Types: full nodata
+Name: "tailscale"; Description: "Tailscale 원격 연결 도구 (선택 — 외부 스마트폰 HTTPS 접속용 · 관리자 권한 필요)"; Types: custom
 
 [Tasks]
 Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; GroupDescription: "추가 작업:"
-Name: "startup"; Description: "Windows 시작 시 백그라운드 팀 서버 자동 실행"; GroupDescription: "추가 작업:"; Flags: unchecked
+Name: "startup"; Description: "Windows 시작 시 백그라운드 자동 실행 (스마트폰 연결용 · 선택)"; GroupDescription: "추가 작업:"; Flags: unchecked
 
 [Dirs]
-Name: "{app}\data"; Permissions: users-modify
-Name: "{app}\data\downloads"; Permissions: users-modify
-Name: "{app}\data\notebooks"; Permissions: users-modify
-Name: "{app}\data\exports"; Permissions: users-modify
-Name: "{app}\data\backups"; Permissions: users-modify
-Name: "{app}\data\updates"; Permissions: users-modify
-Name: "{app}\data\models"; Permissions: users-modify
+Name: "{app}\data"; Permissions: users-modify; Check: IsAdminInstallMode
+Name: "{app}\data\downloads"; Permissions: users-modify; Check: IsAdminInstallMode
+Name: "{app}\data\notebooks"; Permissions: users-modify; Check: IsAdminInstallMode
+Name: "{app}\data\exports"; Permissions: users-modify; Check: IsAdminInstallMode
+Name: "{app}\data\backups"; Permissions: users-modify; Check: IsAdminInstallMode
+Name: "{app}\data\updates"; Permissions: users-modify; Check: IsAdminInstallMode
+Name: "{app}\data\models"; Permissions: users-modify; Check: IsAdminInstallMode
+Name: "{app}\data"; Check: not IsAdminInstallMode
+Name: "{app}\data\downloads"; Check: not IsAdminInstallMode
+Name: "{app}\data\notebooks"; Check: not IsAdminInstallMode
+Name: "{app}\data\exports"; Check: not IsAdminInstallMode
+Name: "{app}\data\backups"; Check: not IsAdminInstallMode
+Name: "{app}\data\updates"; Check: not IsAdminInstallMode
+Name: "{app}\data\models"; Check: not IsAdminInstallMode
 
 [Files]
 Source: "{#ProjectRoot}\dist\목포사랑의교회 행정Q&A\목포사랑의교회 행정Q&A.exe"; DestDir: "{app}"; Components: core; Flags: ignoreversion
@@ -83,10 +91,11 @@ Name: "{group}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑�
 Name: "{group}\사용 안내"; Filename: "{app}\사용안내.txt"
 Name: "{group}\목포사랑의교회 행정Q&A 제거"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; AppUserModelID: "MokpoSarangChurch.AdminQA"; Tasks: desktopicon
-Name: "{commonstartup}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Parameters: "--headless"; AppUserModelID: "MokpoSarangChurch.AdminQA"; Tasks: startup
+Name: "{userstartup}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Parameters: "--headless"; AppUserModelID: "MokpoSarangChurch.AdminQA"; Tasks: startup
 
 [Run]
-Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup-amd64.msi"" /qn /norestart"; StatusMsg: "Tailscale 원격 연결 도구를 오프라인으로 설치하고 있습니다..."; Components: tailscale; Check: NeedsTailscaleInstall; Flags: waituntilterminated
+Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup-amd64.msi"" /qn /norestart"; StatusMsg: "Tailscale 원격 연결 도구를 오프라인으로 설치하고 있습니다..."; Components: tailscale; Check: NeedsTailscaleInstall and IsAdminInstallMode; Flags: waituntilterminated
+Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup-amd64.msi"" /qb /norestart"; StatusMsg: "Tailscale 원격 연결 도구를 설치하고 있습니다..."; Components: tailscale; Check: NeedsTailscaleInstall and (not IsAdminInstallMode); Flags: waituntilterminated
 Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Description: "목포사랑의교회 행정Q&A 지금 실행"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Code]

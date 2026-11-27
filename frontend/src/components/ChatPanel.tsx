@@ -464,6 +464,7 @@ export const ChatPanel: React.FC<Props> = memo(({
                               msg.hasEvidence !== false &&
                               (msg.mode === 'instant' ||
                                 msg.provider === 'local-instant' ||
+                                msg.provider === 'local-pc-engine' ||
                                 msg.provider === 'local-offline-fallback') && (
                                 <button
                                   type="button"
@@ -534,7 +535,9 @@ export const ChatPanel: React.FC<Props> = memo(({
                             )}
 
                             <span className="chip-nowrap text-[11px] text-[#8a8a8e]">
-                              {MODE_LABELS[msg.mode] || msg.mode}
+                              {msg.provider === 'local-pc-engine'
+                                ? 'PC 로컬 엔진 · 0원'
+                                : MODE_LABELS[msg.mode] || msg.mode}
                             </span>
                           </div>
 

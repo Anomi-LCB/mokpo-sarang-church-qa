@@ -7,7 +7,9 @@ export interface AuthState {
   owner_id?: string;
   can_create_group?: boolean;
   is_default_pin?: boolean;
+  local_auto_login?: boolean;
   default_double_verify?: boolean;
+  token?: string;
 }
 
 export interface Notebook {
@@ -194,6 +196,8 @@ export interface CliSettings {
   default_double_verify: boolean;
   default_chat_shared: boolean;
   audit_log_enabled: boolean;
+  local_auto_login: boolean;
+  keep_tray_on_close: boolean;
   is_default_pin: boolean;
   queue: { active: number; queued: number; max_concurrent: number };
   providers: CliProviderInfo[];

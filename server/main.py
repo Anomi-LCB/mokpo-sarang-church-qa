@@ -49,6 +49,7 @@ from server.auth import AuthUser, PinAuthManager, get_client_ip, require_admin, 
 from server.backup import create_backup, ensure_daily_backup, get_backup_path, list_backups, restore_backup
 from server.cli_providers import (
     NO_EVIDENCE_MESSAGE,
+    NoExternalAIConfiguredError,
     build_grounded_prompt,
     close_shared_http_client,
     detect_cli_providers,
@@ -157,6 +158,8 @@ class CliSettingsReq(BaseModel):
     default_double_verify: bool = False
     default_chat_shared: bool = False
     audit_log_enabled: bool = True
+    local_auto_login: bool = True
+    keep_tray_on_close: bool = False
 
 
 class AiConnectionTestReq(BaseModel):
@@ -364,6 +367,16 @@ def create_app(
             shown = False
         return {"ok": True, "shown": shown}
 
+    def _is_direct_loopback(request: Request) -> bool:
+        """Return True ONLY for direct local-PC requests (never via reverse proxy, tunnel, or LAN)."""
+        host = ((request.client.host if request.client else "") or "").strip().lower()
+        if host not in ("127.0.0.1", "::1", "localhost"):
+            return False
+        for hdr in ("x-forwarded-for", "x-forwarded-host", "cf-connecting-ip", "true-client-ip"):
+            if request.headers.get(hdr):
+                return False
+        return True
+
     # ---- Auth & Short-lived File Tickets ----
     @app.post("/api/auth/login")
     def login(body: LoginReq, request: Request, response: Response) -> dict[str, Any]:
@@ -375,6 +388,7 @@ def create_app(
         token = auth.issue_token(user)
         is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
         auth.set_cookie(response, token, is_https=is_https)
+        response.delete_cookie("church_local_locked", path="/")
         return {
             "ok": True,
             "role": user.role,
@@ -389,23 +403,58 @@ def create_app(
     def logout(request: Request, response: Response) -> dict[str, bool]:
         auth: PinAuthManager = request.app.state.auth
         auth.clear_cookie(response)
+        if _is_direct_loopback(request):
+            response.set_cookie(
+                key="church_local_locked",
+                value="1",
+                httponly=True,
+                samesite="lax",
+                path="/",
+            )
         return {"ok": True}
 
     @app.get("/api/auth/me")
-    def auth_me(request: Request) -> dict[str, Any]:
+    def auth_me(request: Request, response: Response) -> dict[str, Any]:
         auth: PinAuthManager = request.app.state.auth
         db: Database = request.app.state.db
         user = auth.get_user_from_request(request)
+        is_loopback = _is_direct_loopback(request)
+        local_auto = db.get_setting("local_auto_login", "1") == "1"
+
         if not user:
+            if is_loopback and local_auto and request.cookies.get("church_local_locked") != "1":
+                user = AuthUser(
+                    role="admin",
+                    label="내 PC",
+                    owner_id="local_pc_owner",
+                )
+                db.upsert_member(user.owner_id, user.label, user.role)
+                token = auth.issue_token(user)
+                is_https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+                auth.set_cookie(response, token, is_https=is_https)
+                return {
+                    "authenticated": True,
+                    "role": user.role,
+                    "label": user.label,
+                    "owner_id": user.owner_id,
+                    "can_create_group": True,
+                    "is_default_pin": False,
+                    "local_auto_login": True,
+                    "default_double_verify": db.get_setting("default_double_verify", "0") == "1",
+                    "token": token,
+                }
             return {"authenticated": False}
+
         db.upsert_member(user.owner_id, user.label, user.role)
+        suppress_default_pin_nag = is_loopback and local_auto
         return {
             "authenticated": True,
             "role": user.role,
             "label": user.label,
             "owner_id": user.owner_id,
             "can_create_group": db.can_user_create_group(user.owner_id, user.role),
-            "is_default_pin": auth.is_using_default_pins() if user.role == "admin" else False,
+            "is_default_pin": False if suppress_default_pin_nag else (auth.is_using_default_pins() if user.role == "admin" else False),
+            "local_auto_login": is_loopback and local_auto,
             "default_double_verify": db.get_setting("default_double_verify", "0") == "1",
         }
 
@@ -1368,6 +1417,7 @@ def create_app(
 
                 full_parts: list[str] = []
                 offline_fallback_used = False
+                local_pc_engine_used = False
                 try:
                     async for used_pid, piece in stream_cli_with_failover(
                         provider_id,
@@ -1384,6 +1434,20 @@ def create_app(
                             break
                         full_parts.append(piece)
                         yield _sse("delta", {"text": piece})
+                except NoExternalAIConfiguredError:
+                    # First-class 100% local standalone PC engine (zero error banner, zero token cost)
+                    local_pc_engine_used = True
+                    active_provider = "local-pc-engine"
+                    yield _sse(
+                        "status",
+                        {
+                            "stage": "local_pc_engine",
+                            "message": f"PC 로컬 내장 엔진으로 원문 조항 {len(citations)}건 즉시 추출 완료 (토큰 0원)",
+                        },
+                    )
+                    instant_md = format_instant_search_answer(body.query, retrieval)
+                    full_parts.append(instant_md)
+                    yield _sse("delta", {"text": instant_md})
                 except Exception:
                     if full_parts:
                         raise
@@ -1406,13 +1470,19 @@ def create_app(
                     yield _sse("delta", {"text": instant_md})
 
                 full_text = "".join(full_parts).strip() or NO_EVIDENCE_MESSAGE
-                is_negative = (not offline_fallback_used) and (
+                is_negative = (not offline_fallback_used and not local_pc_engine_used) and (
                     "찾을 수 없습니다" in full_text[:120] or "정보가 없습니다" in full_text[:120]
                 )
 
                 # Optional 2-Pass AI Strict Verification against raw RAG excerpts
                 double_verified = False
-                if body.double_verify and not is_negative and not offline_fallback_used and not await request.is_disconnected():
+                if (
+                    body.double_verify
+                    and not is_negative
+                    and not offline_fallback_used
+                    and not local_pc_engine_used
+                    and not await request.is_disconnected()
+                ):
                     yield _sse("status", {"stage": "verifying", "message": "이중 원문 재대조 수행 중 (조항·숫자·쪽수 검수)..."})
                     v_prompt = build_double_verify_prompt(body.query, full_text, retrieval)
                     v_parts: list[str] = []
@@ -1435,7 +1505,14 @@ def create_app(
                         pass
 
                 # Deterministic Post-Generation Citation Verifier
-                if offline_fallback_used:
+                if local_pc_engine_used:
+                    verification = {
+                        "status": "verified",
+                        "verified_count": len(citations),
+                        "unverified_refs": [],
+                        "summary": f"PC 로컬 엔진 원문 추출 {len(citations)}건 (토큰 0원 · {retrieval.elapsed_ms:.0f}ms)",
+                    }
+                elif offline_fallback_used:
                     verification = {
                         "status": "verified",
                         "verified_count": len(citations),
@@ -1458,6 +1535,7 @@ def create_app(
                 if (
                     not is_negative
                     and not offline_fallback_used
+                    and not local_pc_engine_used
                     and not retrieval.followup_rewritten
                     and verification.get("status") in ("verified", "partial")
                     and len(full_text) >= 40
@@ -1552,8 +1630,10 @@ def create_app(
                 active_summary = f"자동 모드 · {sel_c.name}{extra}"
             elif sel_api and sel_api["has_key"]:
                 active_summary = f"자동 모드 · {sel_api['name']} ({ai_cfg.effective_api_model()})"
+            elif ai_cfg.api_provider == "openai_compatible" and (ai_cfg.api_model.strip() or ai_cfg.api_base_url.strip()):
+                active_summary = f"로컬 무료 AI · Ollama ({ai_cfg.effective_api_model()})"
             else:
-                active_summary = "오프라인 즉시 원문 검색 (CLI · API 키 미설정)"
+                active_summary = "PC 로컬 내장 엔진 v4.0 (인터넷·토큰 0원 · 완전 오프라인)"
 
         return {
             "connection_mode": ai_cfg.connection_mode,
@@ -1569,6 +1649,8 @@ def create_app(
             "default_double_verify": db.get_setting("default_double_verify", "0") == "1",
             "default_chat_shared": db.get_setting("default_chat_shared", "0") == "1",
             "audit_log_enabled": db.get_setting("audit_log_enabled", "1") == "1",
+            "local_auto_login": db.get_setting("local_auto_login", "1") == "1",
+            "keep_tray_on_close": db.get_setting("keep_tray_on_close", "0") == "1",
             "is_default_pin": auth.is_using_default_pins(),
             "queue": q_mgr.status(),
             "providers": providers,
@@ -1600,6 +1682,8 @@ def create_app(
         db.set_setting("default_double_verify", "1" if body.default_double_verify else "0")
         db.set_setting("default_chat_shared", "1" if body.default_chat_shared else "0")
         db.set_setting("audit_log_enabled", "1" if body.audit_log_enabled else "0")
+        db.set_setting("local_auto_login", "1" if body.local_auto_login else "0")
+        db.set_setting("keep_tray_on_close", "1" if body.keep_tray_on_close else "0")
         await q_mgr.set_max_concurrent(body.max_concurrent)
         db.log_audit(
             "settings_updated",

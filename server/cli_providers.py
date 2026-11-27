@@ -43,6 +43,10 @@ NO_EVIDENCE_MESSAGE = (
 )
 
 
+class NoExternalAIConfiguredError(RuntimeError):
+    """Raised when no external CLI tool or API key is configured on this local PC."""
+
+
 @dataclass
 class CLIProviderInfo:
     id: str
@@ -829,16 +833,16 @@ def _build_unified_engine_chain(
                 api_chain.append(("api", pid))
 
     if mode == "api":
-        return api_chain or [("api", ai_config.api_provider)]
+        return api_chain
     if mode == "cli":
-        return cli_chain or [("cli", primary_id)]
+        return cli_chain
 
     # mode == "auto": prefer installed CLI first if available, else configured API; failover crosses CLI <-> API
     if cli_chain:
         return cli_chain + (api_chain if failover_enabled else [])
     if api_chain:
         return api_chain
-    return [("cli", primary_id)]
+    return []
 
 
 async def stream_cli_with_failover(
@@ -852,6 +856,8 @@ async def stream_cli_with_failover(
 ) -> AsyncIterator[tuple[str, str]]:
     """Unified streaming engine supporting CLI, direct APIs (Anthropic/OpenAI/Gemini/Ollama), and auto-failover."""
     chain = _build_unified_engine_chain(primary_id, failover_enabled=failover_enabled, ai_config=ai_config)
+    if not chain:
+        raise NoExternalAIConfiguredError("외부 AI(CLI/API)가 연결되어 있지 않습니다. PC 로컬 내장 검색 엔진을 사용합니다.")
     last_err: Exception | None = None
 
     for idx, (kind, pid) in enumerate(chain):

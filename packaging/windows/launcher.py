@@ -215,7 +215,7 @@ def _bring_window_to_front(win: Any) -> bool:
 def _run_native_window(
     url: str,
     *,
-    hide_on_close: bool,
+    should_hide_on_close: Any,
     shutting_down_ref: dict[str, bool],
     window_ref: dict[str, Any],
 ) -> bool:
@@ -223,6 +223,8 @@ def _run_native_window(
 
     - Never launches external Edge/Chrome browser windows or restores prior web tabs.
     - Pinning the running taskbar icon pins 목포사랑의교회 행정Q&A.exe directly.
+    - Personal standalone desktop mode (default): closing the window exits cleanly with zero lingering processes.
+    - Background server mode (opt-in): closing hides to system tray so smartphones keep connecting.
     - Returns True if the native window ran and exited cleanly, False if WebView2 failed to start.
     """
     try:
@@ -260,7 +262,11 @@ def _run_native_window(
                 pass
 
         def _on_closing() -> bool | None:
-            if hide_on_close and not shutting_down_ref.get("flag", False):
+            try:
+                hide_now = bool(should_hide_on_close()) if callable(should_hide_on_close) else bool(should_hide_on_close)
+            except Exception:
+                hide_now = False
+            if hide_now and not shutting_down_ref.get("flag", False):
                 # Hide asynchronously after FormClosing cancels cleanly; server & tray stay alive
                 threading.Thread(target=win.hide, daemon=True).start()
                 return False
@@ -352,7 +358,7 @@ def main() -> None:
             return
         ok = _run_native_window(
             f"http://127.0.0.1:{port}",
-            hide_on_close=False,
+            should_hide_on_close=False,
             shutting_down_ref={"flag": True},
             window_ref={"window": None},
         )
@@ -395,6 +401,25 @@ def main() -> None:
         on_shutdown=_graceful_shutdown,
         on_show_window=_show_native_window if not headless else None,
     )
+
+    def _get_keep_tray_on_close() -> bool:
+        try:
+            db = getattr(app.state, "db", None)
+            return bool(db and db.get_setting("keep_tray_on_close", "0") == "1")
+        except Exception:
+            return False
+
+    def _toggle_keep_tray_on_close() -> bool:
+        try:
+            db = getattr(app.state, "db", None)
+            if db is None:
+                return False
+            next_val = not (db.get_setting("keep_tray_on_close", "0") == "1")
+            db.set_setting("keep_tray_on_close", "1" if next_val else "0")
+            return next_val
+        except Exception:
+            return False
+
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning", log_config=None)
     server = uvicorn.Server(config)
     server_ref["server"] = server
@@ -421,6 +446,10 @@ def main() -> None:
         if not _show_native_window():
             _spawn_window_client()
 
+    def on_toggle_keep_tray(icon, item):
+        _toggle_keep_tray_on_close()
+        icon.update_menu()
+
     def on_toggle_startup(icon, item):
         _toggle_startup_shortcut()
         icon.update_menu()
@@ -431,12 +460,17 @@ def main() -> None:
     menu = pystray.Menu(
         pystray.MenuItem("목포사랑의교회 행정Q&A 열기", on_open, default=True),
         pystray.MenuItem(
+            "창 닫을 때 백그라운드 유지 (스마트폰 연결용)",
+            on_toggle_keep_tray,
+            checked=lambda item: _get_keep_tray_on_close(),
+        ),
+        pystray.MenuItem(
             "Windows 시작 시 자동 실행",
             on_toggle_startup,
             checked=lambda item: _has_startup_shortcut(),
         ),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("서버 완전 종료", on_quit),
+        pystray.MenuItem("프로그램 완전 종료", on_quit),
     )
     tray = pystray.Icon("ChurchSearchServer", _load_tray_icon(), f"{APP_NAME} (:{port})", menu)
     tray_ref["icon"] = tray
@@ -445,12 +479,13 @@ def main() -> None:
         tray.run()
         return
 
-    # Normal launch: tray runs in background thread, native WebView2 window owns the main thread
+    # Personal standalone desktop mode by default: closing the native window cleanly exits the app.
+    # When user opts into 'keep_tray_on_close', closing hides to tray so smartphones stay connected.
     tray.run_detached()
     try:
         ok = _run_native_window(
             url,
-            hide_on_close=True,
+            should_hide_on_close=_get_keep_tray_on_close,
             shutting_down_ref=shutting_down_ref,
             window_ref=window_ref,
         )

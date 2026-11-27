@@ -7,7 +7,7 @@ from pathlib import Path
 os.environ.setdefault("PYTHONUTF8", "1")
 
 APP_NAME = "목포사랑의교회 행정Q&A"
-APP_VERSION = "4.3.1"
+APP_VERSION = "4.4.0"
 DEFAULT_UPDATE_REPO = "Anomi-LCB/mokpo-sarang-church-qa"
 DEFAULT_UPDATE_MANIFEST_URL = (
     f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest/download/update-manifest.json"

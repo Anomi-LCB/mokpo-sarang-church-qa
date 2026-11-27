@@ -22,7 +22,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import { api, authHeaders, isIOS, isStandalonePWA } from './api';
+import { api, authHeaders, isIOS, isStandalonePWA, setStoredToken } from './api';
 import type { AdminTab } from './components/AdminModal';
 import { ChatPanel } from './components/ChatPanel';
 import { FormsVault } from './components/FormsVault';
@@ -427,6 +427,9 @@ export function App() {
 
     try {
       const st = await api.authMe();
+      if (st.authenticated && st.token) {
+        setStoredToken(st.token);
+      }
       setIsOfflineMode(false);
       setAuth(st);
       if (st.default_double_verify) {

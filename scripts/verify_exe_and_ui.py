@@ -149,7 +149,15 @@ def main() -> None:
             # ---- 1. Android Mobile Viewport (412 x 915) ----
             m_ctx = browser.new_context(viewport={"width": 412, "height": 915}, device_scale_factor=2)
             page = m_ctx.new_page()
-            page.goto(BASE_URL, wait_until="networkidle")
+            # v4.4.0: Local PC loopback enters directly without a PIN wall (opens live SSE stream, so wait domcontentloaded)!
+            page.goto(BASE_URL, wait_until="domcontentloaded")
+            page.wait_for_selector("header", timeout=10000)
+            page.wait_for_timeout(450)
+
+            # Click Logout to audit PinGate layout & verify explicit logout locks cleanly
+            page.click('header button[aria-label="로그아웃"]')
+            page.wait_for_selector('input[type="password"]', timeout=8000)
+            page.wait_for_timeout(250)
             audit_geometry(page, "Mobile-412x915-PinGate")
             page.screenshot(path=str(SHOT_DIR / "audit_mobile_pingate.png"))
 
@@ -237,9 +245,8 @@ def main() -> None:
             # ---- 2. Desktop Viewport (1440 x 900) ----
             d_ctx = browser.new_context(viewport={"width": 1440, "height": 900})
             dpage = d_ctx.new_page()
-            dpage.goto(BASE_URL, wait_until="networkidle")
-            dpage.fill('input[type="password"]', "0000")
-            dpage.click('button[type="submit"]')
+            # v4.4.0: Personal local desktop launches directly into the app with ZERO PIN login wall!
+            dpage.goto(BASE_URL, wait_until="domcontentloaded")
             dpage.wait_for_selector("header", timeout=10000)
             dpage.wait_for_timeout(700)
 
@@ -480,6 +487,7 @@ def main() -> None:
             dpage.click('div[data-modal="settings"] button:has-text("하단 열기·닫기")')
             dpage.wait_for_timeout(120)
             assert dpage.evaluate("() => localStorage.getItem('church_search_citation_mode')") == "inline"
+            dpage.wait_for_selector("text=창을 닫아도 백그라운드 유지", timeout=6000)
             dpage.wait_for_selector("text=AI 연결 방식 선택", timeout=6000)
             dpage.wait_for_selector("text=스마트 검색 엔진", timeout=6000)
             dpage.wait_for_selector("text=한글 정밀 분석 켜짐", timeout=6000)
@@ -508,14 +516,15 @@ def main() -> None:
                     return await r.json();
                 }"""
             )
-            print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.3.1", f"Expected v4.3.1, got {eng_status}"
+            print(f"[AUDIT Engine-v4.4-EXE] {eng_status}", flush=True)
+            assert eng_status.get("version") == "4.4.0", f"Expected v4.4.0, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_ai_engine.png"))
 
             dpage.click('div[data-modal="settings"] button:has-text("보안 · PIN")')
+            dpage.wait_for_selector("text=로컬 PC 실행 시 PIN 없이 바로 열기", timeout=6000)
             dpage.wait_for_selector("text=최근 사용 기록", timeout=6000)
             dpage.wait_for_timeout(200)
             sec_txt = dpage.locator('div[data-modal="settings"]').inner_text()
@@ -618,10 +627,9 @@ def main() -> None:
             # ---- 3. Mobile Standardization Studio Audit (412 x 915) ----
             mstd_ctx = browser.new_context(viewport={"width": 412, "height": 915}, device_scale_factor=2)
             mspage = mstd_ctx.new_page()
-            mspage.goto(BASE_URL, wait_until="networkidle")
-            mspage.fill('input[type="password"]', "0000")
-            mspage.click('button[type="submit"]')
+            mspage.goto(BASE_URL, wait_until="domcontentloaded")
             mspage.wait_for_selector("header", timeout=10000)
+            mspage.wait_for_timeout(300)
             mspage.click('header button:has-text("표준화실")')
             mspage.wait_for_selector('button[aria-label="전체 교차 분류 기억함"]', timeout=8000)
             mspage.wait_for_selector('button[aria-label="표준화실 설정"]', timeout=5000)
