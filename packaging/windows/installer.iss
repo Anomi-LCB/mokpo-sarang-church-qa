@@ -13,8 +13,8 @@
 [Setup]
 AppId={{8D6E4921-7C31-4F92-9A0E-C81D2B4F9102}
 AppName=목포사랑의교회 행정Q&A
-AppVersion=4.2.1
-AppVerName=목포사랑의교회 행정Q&A 4.2.1
+AppVersion=4.2.2
+AppVerName=목포사랑의교회 행정Q&A 4.2.2
 AppPublisher=목포사랑의교회 행정·법규 검색 시스템
 DefaultDirName={autopf}\목포사랑의교회 행정Q&A
 DefaultGroupName=목포사랑의교회 행정Q&A
@@ -79,11 +79,11 @@ Source: "{#SeedDir}\notebooks\*"; DestDir: "{app}\data\notebooks"; Components: c
 Source: "{#ProjectRoot}\packaging\windows\redist\tailscale-setup-amd64.msi"; DestDir: "{tmp}"; Components: tailscale; Flags: deleteafterinstall
 
 [Icons]
-Name: "{group}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"
+Name: "{group}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; AppUserModelID: "MokpoSarangChurch.AdminQA"
 Name: "{group}\사용 안내"; Filename: "{app}\사용안내.txt"
 Name: "{group}\목포사랑의교회 행정Q&A 제거"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Tasks: desktopicon
-Name: "{commonstartup}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Parameters: "--headless"; Tasks: startup
+Name: "{autodesktop}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; AppUserModelID: "MokpoSarangChurch.AdminQA"; Tasks: desktopicon
+Name: "{commonstartup}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Parameters: "--headless"; AppUserModelID: "MokpoSarangChurch.AdminQA"; Tasks: startup
 
 [Run]
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup-amd64.msi"" /qn /norestart"; StatusMsg: "Tailscale 원격 연결 도구를 오프라인으로 설치하고 있습니다..."; Components: tailscale; Check: NeedsTailscaleInstall; Flags: waituntilterminated

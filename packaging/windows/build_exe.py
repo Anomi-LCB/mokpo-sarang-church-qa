@@ -42,6 +42,8 @@ def main() -> None:
         f"{frontend_dist};frontend/dist",
         "--add-data",
         f"{icon_png};packaging/windows",
+        "--add-data",
+        f"{icon_ico};packaging/windows",
         "--hidden-import",
         "uvicorn.logging",
         "--hidden-import",
@@ -54,6 +56,18 @@ def main() -> None:
         "uvicorn.lifespan.on",
         "--hidden-import",
         "pystray._win32",
+        "--collect-all",
+        "webview",
+        "--collect-all",
+        "pythonnet",
+        "--collect-all",
+        "clr_loader",
+        "--hidden-import",
+        "webview.platforms.winforms",
+        "--hidden-import",
+        "webview.platforms.edgechromium",
+        "--hidden-import",
+        "clr",
         "--hidden-import",
         "multipart",
         "--hidden-import",
@@ -110,12 +124,13 @@ def main() -> None:
     readme = out_app_dir / "사용안내.txt"
     readme.write_text(
         "========================================================\n"
-        "  목포사랑의교회 행정Q&A (v4.2.1)\n"
+        "  목포사랑의교회 행정Q&A (v4.2.2)\n"
         "========================================================\n\n"
-        "1. 실행 방법:\n"
-        "   - '목포사랑의교회 행정Q&A.exe' 를 더블클릭하면 앱 창이 열리며 백그라운드 팀 서버가 시작됩니다.\n"
-        "   - 앱 창을 닫아도 우측 하단 작업표시줄(트레이 아이콘)에서 서버가 유지되어\n"
-        "     교역자/행정팀 스마트폰 접속이 끊어지지 않습니다.\n\n"
+        "1. 실행 및 작업표시줄 고정:\n"
+        "   - '목포사랑의교회 행정Q&A.exe' 를 실행하면 외부 웹 브라우저(Edge/Chrome)가 아닌\n"
+        "     전용 독립 Windows 앱 창이 열리며 백그라운드 팀 서버가 시작됩니다.\n"
+        "   - 작업표시줄에 고정해도 웹사이트가 아닌 전용 앱 아이콘 그대로 고정되어 실행됩니다.\n"
+        "   - 앱 창을 닫아도 우측 하단 시스템 트레이에서 서버가 유지되어 스마트폰 접속이 끊어지지 않습니다.\n\n"
         "2. 엔진 v4.0 (Kiwi 한국어 형태소 · 계층 청킹 · 교차참조 그래프 · 선택형 ONNX 신경망 팩):\n"
         "   - Kiwi 형태소 분석기와 교회법 전문 사전으로 구어체·일상어 질문도 정확히 조항을 찾아냅니다.\n"
         "   - 조항 안의 '제N조 준용', '별표' 등 교차참조를 자동 추적하고, 표 구조를 마크다운 표로 보존합니다.\n"

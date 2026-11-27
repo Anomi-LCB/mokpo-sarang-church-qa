@@ -234,7 +234,12 @@ def _find_frontend_dist() -> Path | None:
     return None
 
 
-def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown: Any = None) -> FastAPI:
+def create_app(
+    db_path: Path | None = None,
+    port: int | None = None,
+    on_shutdown: Any = None,
+    on_show_window: Any = None,
+) -> FastAPI:
     active_port = port or int(os.environ.get("CHURCH_SEARCH_PORT", str(DEFAULT_PORT)))
 
     @asynccontextmanager
@@ -331,6 +336,20 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
             "notebooks": len(db.list_notebooks()),
             "queue": q.status(),
         }
+
+    # ---- Native Desktop Window Activation (loopback only) ----
+    @app.post("/api/internal/show-window")
+    def internal_show_window(request: Request) -> dict[str, Any]:
+        client_host = (request.client.host if request.client else "") or ""
+        if client_host not in ("127.0.0.1", "::1", "localhost"):
+            raise HTTPException(status_code=403, detail="로컬 장치에서만 앱 창을 활성화할 수 있습니다.")
+        if on_show_window is None:
+            return {"ok": True, "shown": False}
+        try:
+            shown = bool(on_show_window())
+        except Exception:
+            shown = False
+        return {"ok": True, "shown": shown}
 
     # ---- Auth & Short-lived File Tickets ----
     @app.post("/api/auth/login")

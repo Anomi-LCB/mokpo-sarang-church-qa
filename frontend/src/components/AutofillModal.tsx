@@ -192,11 +192,6 @@ export const AutofillModal: React.FC<Props> = ({ form, onClose }) => {
   };
 
   const handlePrintPreview = () => {
-    const win = window.open('', '_blank', 'width=840,height=1020');
-    if (!win) {
-      window.print();
-      return;
-    }
     const esc = (s: string) =>
       s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] || c);
     const rowsHtml = effectiveDraft.fields
@@ -208,8 +203,41 @@ export const AutofillModal: React.FC<Props> = ({ form, onClose }) => {
     const bodyHtml = effectiveDraft.body_paragraphs
       .map((p) => `<p style="margin:8px 0;line-height:1.8;">${esc(p)}</p>`)
       .join('');
-    win.document.write(`<!doctype html><html lang="ko"><head><meta charset="utf-8"/><title>${esc(effectiveDraft.document_title)}</title><style>@page{size:A4;margin:20mm;}body{font-family:"Malgun Gothic","Apple SD Gothic Neo",sans-serif;color:#111;padding:24px;}table{width:100%;border-collapse:collapse;margin-top:20px;font-size:13.5px;}</style></head><body><h1 style="text-align:center;font-size:22px;letter-spacing:0.08em;border-bottom:2px solid #111;padding-bottom:12px;margin:0 0 18px;">${esc(effectiveDraft.document_title)}</h1><table>${rowsHtml}</table>${bodyHtml ? `<div style="margin-top:22px;font-size:14px;">${bodyHtml}</div>` : ''}<p style="text-align:center;margin-top:42px;font-size:14px;">${esc(effectiveDraft.date_line)}</p><p style="text-align:right;margin-top:22px;font-size:14.5px;font-weight:600;">${esc(effectiveDraft.signer_line)}</p><p style="text-align:center;margin-top:44px;font-size:17px;font-weight:700;">${esc(effectiveDraft.recipient_line)}</p><script>window.onload=function(){window.print();}</script></body></html>`);
-    win.document.close();
+    const docHtml = `<!doctype html><html lang="ko"><head><meta charset="utf-8"/><title>${esc(effectiveDraft.document_title)}</title><style>@page{size:A4;margin:20mm;}body{font-family:"Malgun Gothic","Apple SD Gothic Neo",sans-serif;color:#111;padding:24px;}table{width:100%;border-collapse:collapse;margin-top:20px;font-size:13.5px;}</style></head><body><h1 style="text-align:center;font-size:22px;letter-spacing:0.08em;border-bottom:2px solid #111;padding-bottom:12px;margin:0 0 18px;">${esc(effectiveDraft.document_title)}</h1><table>${rowsHtml}</table>${bodyHtml ? `<div style="margin-top:22px;font-size:14px;">${bodyHtml}</div>` : ''}<p style="text-align:center;margin-top:42px;font-size:14px;">${esc(effectiveDraft.date_line)}</p><p style="text-align:right;margin-top:22px;font-size:14.5px;font-weight:600;">${esc(effectiveDraft.signer_line)}</p><p style="text-align:center;margin-top:44px;font-size:17px;font-weight:700;">${esc(effectiveDraft.recipient_line)}</p></body></html>`;
+
+    // Print via hidden same-origin iframe so native WebView2 desktop window prints directly without opening an external browser tab
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(iframe);
+    const frameWin = iframe.contentWindow;
+    const frameDoc = frameWin?.document;
+    if (!frameWin || !frameDoc) {
+      iframe.remove();
+      window.print();
+      return;
+    }
+    frameDoc.open();
+    frameDoc.write(docHtml);
+    frameDoc.close();
+    const cleanup = () => {
+      window.setTimeout(() => iframe.remove(), 500);
+    };
+    frameWin.onafterprint = cleanup;
+    window.setTimeout(() => {
+      try {
+        frameWin.focus();
+        frameWin.print();
+      } catch {
+        window.print();
+      }
+      window.setTimeout(cleanup, 60000);
+    }, 120);
   };
 
   return (
