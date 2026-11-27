@@ -53,7 +53,7 @@ def _is_our_server_healthy(port: int) -> bool:
     """Return True ONLY when *our* 목포사랑의교회 행정Q&A server is responding on `port`."""
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(f"http://127.0.0.1:{port}/api/health", timeout=1.5) as resp:
+        with opener.open(f"http://127.0.0.1:{port}/api/health", timeout=0.6) as resp:
             if resp.status != 200:
                 return False
             data = json.loads(resp.read().decode("utf-8", errors="ignore"))

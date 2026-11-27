@@ -509,7 +509,7 @@ def main() -> None:
                 }"""
             )
             print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.3.0", f"Expected v4.3.0, got {eng_status}"
+            assert eng_status.get("version") == "4.3.1", f"Expected v4.3.1, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")

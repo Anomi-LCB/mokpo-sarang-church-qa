@@ -32,6 +32,7 @@ export const UpdateModal: React.FC<Props> = ({ info, isAdmin, onSkipped, onClose
   const [progress, setProgress] = useState<UpdateProgress>(info.progress);
   const [busy, setBusy] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [restartStalled, setRestartStalled] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errMsg, setErrMsg] = useState('');
 
@@ -57,15 +58,25 @@ export const UpdateModal: React.FC<Props> = ({ info, isAdmin, onSkipped, onClose
 
   useEffect(() => {
     if (!restarting) return;
+    setRestartStalled(false);
+    let sawOffline = false;
+    const startedAt = Date.now();
     const timer = window.setInterval(() => {
       void fetch('/api/health', { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
-          if (data && data.status === 'ok' && data.version && data.version !== info.current_version) {
-            window.location.reload();
+          if (data && data.status === 'ok' && data.version) {
+            if (data.version !== info.current_version || sawOffline) {
+              window.location.reload();
+            }
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          sawOffline = true;
+        });
+      if (Date.now() - startedAt > 35000) {
+        setRestartStalled(true);
+      }
     }, 1500);
     return () => window.clearInterval(timer);
   }, [restarting, info.current_version]);
@@ -133,7 +144,7 @@ export const UpdateModal: React.FC<Props> = ({ info, isAdmin, onSkipped, onClose
               </p>
             </div>
           </div>
-          {!restarting && (
+          {(!restarting || restartStalled) && (
             <button
               type="button"
               onClick={onClose}
@@ -216,6 +227,23 @@ export const UpdateModal: React.FC<Props> = ({ info, isAdmin, onSkipped, onClose
           {statusMsg && (
             <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs text-emerald-900">
               {statusMsg}
+            </div>
+          )}
+
+          {restartStalled && (
+            <div className="space-y-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-900">
+              <p className="font-semibold">자동 재시작이 지연되고 있습니다.</p>
+              <p className="text-[11px] leading-relaxed">
+                Windows 권한 확인(UAC) 창이 뒤편에 숨어 있거나 취소된 경우일 수 있습니다. 작업표시줄의 방패 아이콘을 확인하시거나, 바탕화면의 <strong>목포사랑의교회 행정Q&amp;A</strong> 아이콘을 다시 실행해 주세요. (기존 문서·DB는 자동 백업되어 안전합니다.)
+              </p>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="chip-nowrap inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-[#27272a]"
+              >
+                <RefreshCw className="h-3 w-3" />
+                <span>지금 다시 연결 확인</span>
+              </button>
             </div>
           )}
 

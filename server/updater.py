@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -275,14 +277,31 @@ $ExeName = '{exe_name.replace("'", "''")}'
 $HealthUrl = 'http://127.0.0.1:{port}/api/health'
 
 function Write-Log([string]$Msg) {{
-    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    Add-Content -Path $LogFile -Value "[$ts] $Msg" -Encoding UTF8
+    try {{
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -Path $LogFile -Value "[$ts] $Msg" -Encoding UTF8 -ErrorAction SilentlyContinue
+    }} catch {{}}
+}}
+
+function Move-WithRetry([string]$Src, [string]$Dst) {{
+    for ($try = 0; $try -lt 8; $try++) {{
+        try {{
+            if (Test-Path -LiteralPath $Dst) {{
+                Remove-Item -LiteralPath $Dst -Recurse -Force -ErrorAction Stop
+            }}
+            Move-Item -LiteralPath $Src -Destination $Dst -Force -ErrorAction Stop
+            return
+        }} catch {{
+            if ($try -eq 7) {{ throw }}
+            Start-Sleep -Milliseconds 800
+        }}
+    }}
 }}
 
 Write-Log "Update script started (waiting for PID $TargetPid to exit)..."
 
-# Wait up to 20s for current server process to terminate cleanly
-for ($i = 0; $i -lt 40; $i++) {{
+# Wait up to 15s for current server process to terminate cleanly
+for ($i = 0; $i -lt 30; $i++) {{
     $proc = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue
     if (-not $proc) {{ break }}
     Start-Sleep -Milliseconds 500
@@ -293,13 +312,17 @@ if ($still) {{
     Stop-Process -Id $TargetPid -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }}
+# Also stop any duplicate app instances holding _internal locks
+$baseProcName = [System.IO.Path]::GetFileNameWithoutExtension($ExeName)
+Get-Process -Name $baseProcName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 600
 
-# Ensure write permission to AppDir; if Program Files requires UAC, self-elevate cleanly
+# Ensure write permission to AppDir; if Program Files requires UAC, self-elevate cleanly using ASCII script path
 $NeedAdmin = $false
 try {{
     $probe = Join-Path $AppDir '.update_write_test'
-    Set-Content -Path $probe -Value 'ok' -ErrorAction Stop
-    Remove-Item -Path $probe -Force -ErrorAction SilentlyContinue
+    Set-Content -LiteralPath $probe -Value 'ok' -ErrorAction Stop
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
 }} catch {{
     $NeedAdmin = $true
 }}
@@ -308,29 +331,35 @@ if ($NeedAdmin) {{
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {{
         Write-Log "Requesting UAC elevation for Program Files swap..."
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',"`"$PSCommandPath`"")
-        exit 0
+        try {{
+            Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File',$PSCommandPath) -ErrorAction Stop
+            exit 0
+        }} catch {{
+            Write-Log "UAC elevation cancelled or failed: $($_.Exception.Message). Restarting existing app..."
+            $oldExe = Join-Path $AppDir $ExeName
+            if (Test-Path -LiteralPath $oldExe) {{ Start-Process -FilePath $oldExe -WorkingDirectory $AppDir }}
+            exit 3
+        }}
     }}
 }}
 
 # Prepare rollback backup of old binaries ONLY (never touch data/)
-if (Test-Path $RollbackDir) {{ Remove-Item -Path $RollbackDir -Recurse -Force }}
+if (Test-Path -LiteralPath $RollbackDir) {{ Remove-Item -LiteralPath $RollbackDir -Recurse -Force }}
 New-Item -ItemType Directory -Path $RollbackDir -Force | Out-Null
 
 $SwapItems = @($ExeName, '_internal', '사용안내.txt')
 try {{
     foreach ($item in $SwapItems) {{
         $src = Join-Path $AppDir $item
-        if (Test-Path $src) {{
-            Move-Item -Path $src -Destination (Join-Path $RollbackDir $item) -Force
+        if (Test-Path -LiteralPath $src) {{
+            Move-WithRetry $src (Join-Path $RollbackDir $item)
         }}
     }}
 
-    Get-ChildItem -Path $StageDir -Force | ForEach-Object {{
+    Get-ChildItem -LiteralPath $StageDir -Force | ForEach-Object {{
         if ($_.Name -ieq 'data' -or $_.Name -ieq 'update-manifest.json') {{ return }}
         $dest = Join-Path $AppDir $_.Name
-        if (Test-Path $dest) {{ Remove-Item -Path $dest -Recurse -Force }}
-        Move-Item -Path $_.FullName -Destination $dest -Force
+        Move-WithRetry $_.FullName $dest
     }}
     Write-Log "New binaries moved into $AppDir successfully."
 }} catch {{
@@ -338,25 +367,24 @@ try {{
     foreach ($item in $SwapItems) {{
         $rb = Join-Path $RollbackDir $item
         $dest = Join-Path $AppDir $item
-        if (Test-Path $rb) {{
-            if (Test-Path $dest) {{ Remove-Item -Path $dest -Recurse -Force -ErrorAction SilentlyContinue }}
-            Move-Item -Path $rb -Destination $dest -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $rb) {{
+            try {{ Move-WithRetry $rb $dest }} catch {{}}
         }}
     }}
     $oldExe = Join-Path $AppDir $ExeName
-    if (Test-Path $oldExe) {{ Start-Process -FilePath $oldExe -WorkingDirectory $AppDir }}
+    if (Test-Path -LiteralPath $oldExe) {{ Start-Process -FilePath $oldExe -WorkingDirectory $AppDir }}
     exit 1
 }}
 
-# Launch updated app and verify health endpoint within 20s
+# Launch updated app and verify health endpoint within 25s
 $newExe = Join-Path $AppDir $ExeName
-if (Test-Path $newExe) {{
+if (Test-Path -LiteralPath $newExe) {{
     Write-Log "Starting updated executable: $newExe"
     Start-Process -FilePath $newExe -WorkingDirectory $AppDir
 }}
 
 $healthy = $false
-for ($j = 0; $j -lt 20; $j++) {{
+for ($j = 0; $j -lt 25; $j++) {{
     Start-Sleep -Seconds 1
     try {{
         $res = Invoke-WebRequest -Uri $HealthUrl -TimeoutSec 2 -UseBasicParsing
@@ -369,21 +397,20 @@ for ($j = 0; $j -lt 20; $j++) {{
 
 if ($healthy) {{
     Write-Log "Health check PASSED! Cleaning up staging directory."
-    Remove-Item -Path $StageDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $StageDir -Recurse -Force -ErrorAction SilentlyContinue
     exit 0
 }} else {{
-    Write-Log "Health check FAILED after 20s! Performing automatic rollback..."
-    Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($ExeName)) -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Log "Health check FAILED after 25s! Performing automatic rollback..."
+    Get-Process -Name $baseProcName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
     foreach ($item in $SwapItems) {{
         $rb = Join-Path $RollbackDir $item
         $dest = Join-Path $AppDir $item
-        if (Test-Path $rb) {{
-            if (Test-Path $dest) {{ Remove-Item -Path $dest -Recurse -Force -ErrorAction SilentlyContinue }}
-            Move-Item -Path $rb -Destination $dest -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $rb) {{
+            try {{ Move-WithRetry $rb $dest }} catch {{}}
         }}
     }}
-    if (Test-Path $newExe) {{ Start-Process -FilePath $newExe -WorkingDirectory $AppDir }}
+    if (Test-Path -LiteralPath $newExe) {{ Start-Process -FilePath $newExe -WorkingDirectory $AppDir }}
     exit 2
 }}
 """
@@ -663,7 +690,9 @@ class UpdateManager:
         updates_dir = get_updates_dir()
         rollback_dir = updates_dir / "rollback_prev"
         log_file = updates_dir / "update_apply.log"
-        ps_script = updates_dir / "apply_update.ps1"
+        # Place swap script in pure-ASCII %TEMP% path (zero spaces / '&' / directory handle lock on AppDir!)
+        temp_dir = Path(tempfile.gettempdir())
+        ps_script = temp_dir / f"church_qa_apply_update_{os.getpid()}.ps1"
 
         script_body = _build_windows_swap_script(
             pid=os.getpid(),
@@ -677,10 +706,11 @@ class UpdateManager:
         ps_script.write_text(script_body, encoding="utf-8-sig")
 
         self.state.status = "applying"
-        self.state.message = "DB 백업 완료 — 새 버전 적용 후 프로그램을 자동 재시작합니다..."
+        self.state.message = "DB 백업 완료 — 새 버전 적용 후 프로그램을 자동 재시작합니다... (Windows 권한 확인 창이 뜨면 [예]를 눌러 주세요)"
 
+        # CRITICAL: NEVER combine DETACHED_PROCESS with CREATE_NO_WINDOW on Windows — powershell.exe silently aborts!
         creationflags = (
-            getattr(subprocess, "DETACHED_PROCESS", 0)
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
         subprocess.Popen(
@@ -694,7 +724,10 @@ class UpdateManager:
                 "-File",
                 str(ps_script),
             ],
-            cwd=str(updates_dir),
+            cwd=str(temp_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             creationflags=creationflags,
             close_fds=True,
         )
@@ -709,7 +742,6 @@ class UpdateManager:
                     pass
             os._exit(0)
 
-        import threading
         threading.Thread(target=_delayed_exit, daemon=True).start()
 
         return {

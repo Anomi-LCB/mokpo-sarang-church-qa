@@ -534,15 +534,24 @@ export const AdminModal: React.FC<Props> = ({
   useEffect(() => {
     if (!updateRestarting || !updateInfo) return;
     const curVer = updateInfo.current_version;
+    let sawOffline = false;
+    const startedAt = Date.now();
     const timer = window.setInterval(() => {
       void fetch('/api/health', { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (d?.status === 'ok' && d.version && d.version !== curVer) {
+          if (d?.status === 'ok' && d.version && (d.version !== curVer || sawOffline)) {
             window.location.reload();
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          sawOffline = true;
+        });
+      if (Date.now() - startedAt > 35000) {
+        setMsg(
+          '자동 재시작이 지연되고 있습니다. Windows 권한 확인(UAC) 창을 확인하시거나 프로그램을 다시 실행해 주세요. (DB는 자동 백업됨)'
+        );
+      }
     }, 1500);
     return () => window.clearInterval(timer);
   }, [updateRestarting, updateInfo]);

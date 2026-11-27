@@ -182,13 +182,15 @@ class OllamaManager:
         bin_path = find_ollama_binary()
         if not bin_path:
             return False
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             subprocess.Popen(
                 [bin_path, "serve"],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
+                close_fds=True,
             )
         except Exception:
             return False
