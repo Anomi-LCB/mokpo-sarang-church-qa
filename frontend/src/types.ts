@@ -210,6 +210,36 @@ export interface AiTestResult {
   message: string;
 }
 
+export interface OllamaRecommendedModel {
+  id: string;
+  name: string;
+  size_label: string;
+  min_ram_gb: number;
+  badge: string;
+  desc: string;
+}
+
+export interface OllamaSetupState {
+  status: 'idle' | 'installing' | 'starting' | 'pulling' | 'ready' | 'error';
+  progress: number;
+  model: string;
+  message: string;
+  error: string;
+}
+
+export interface OllamaStatus {
+  installed: boolean;
+  binary_path: string;
+  running: boolean;
+  host: string;
+  openai_base_url: string;
+  ram_gb: number;
+  recommended_default: string;
+  installed_models: Array<{ name: string; size_gb: number }>;
+  recommended_models: OllamaRecommendedModel[];
+  setup_state: OllamaSetupState;
+}
+
 export interface UpdateAssetInfo {
   name: string;
   url: string;

@@ -20,6 +20,7 @@ import type {
   NetworkReachability,
   NetworkSummary,
   Notebook,
+  OllamaStatus,
   QuickSearchResult,
   StdBoard,
   StdBoardDetail,
@@ -503,6 +504,22 @@ export const api = {
     model?: string;
     base_url?: string;
   }) => reqJson<AiTestResult>('/api/admin/ai/test', { method: 'POST', body: JSON.stringify(payload) }),
+  quickConnectGemini: (payload: { api_key: string; model?: string; connection_mode?: 'api' | 'auto' }) =>
+    reqJson<{ ok: boolean; model?: string; latency_ms?: number; message: string }>(
+      '/api/admin/ai/quick-connect-gemini',
+      { method: 'POST', body: JSON.stringify(payload) }
+    ),
+  getOllamaStatus: () => reqJson<OllamaStatus>('/api/admin/ollama/status'),
+  setupOllama: (model: string) =>
+    reqJson<{ ok: boolean; started?: boolean; already_running?: boolean; setup_state: OllamaStatus['setup_state'] }>(
+      '/api/admin/ollama/setup',
+      { method: 'POST', body: JSON.stringify({ model }) }
+    ),
+  activateOllama: (model: string) =>
+    reqJson<{ ok: boolean; model: string; message: string }>('/api/admin/ollama/activate', {
+      method: 'POST',
+      body: JSON.stringify({ model }),
+    }),
 
   // ---- Engine v4.0 Status, Local ONNX Neural Pack & Re-Index ----
   getEngineStatus: (notebookId = 'mokpo-sarang-church') =>

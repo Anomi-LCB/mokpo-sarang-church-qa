@@ -13,8 +13,8 @@
 [Setup]
 AppId={{8D6E4921-7C31-4F92-9A0E-C81D2B4F9102}
 AppName=목포사랑의교회 행정Q&A
-AppVersion=4.2.5
-AppVerName=목포사랑의교회 행정Q&A 4.2.5
+AppVersion=4.3.0
+AppVerName=목포사랑의교회 행정Q&A 4.3.0
 AppPublisher=목포사랑의교회 행정·법규 검색 시스템
 DefaultDirName={autopf}\목포사랑의교회 행정Q&A
 DefaultGroupName=목포사랑의교회 행정Q&A
@@ -157,10 +157,10 @@ begin
     True,
     False
   );
+  ApiProviderPage.Add('Google Gemini API — 무료 티어 추천 (카드 불필요 · gemini-2.5-flash)');
+  ApiProviderPage.Add('로컬 무료 AI Ollama (평생 0원 · 완전 오프라인 · gemma3:4b)');
   ApiProviderPage.Add('Anthropic Claude API (claude-sonnet-4-5)');
   ApiProviderPage.Add('OpenAI API (gpt-4.1-mini)');
-  ApiProviderPage.Add('Google Gemini API (gemini-2.5-flash)');
-  ApiProviderPage.Add('로컬 Ollama · OpenAI 호환 API (완전 오프라인 로컬 AI)');
   ApiProviderPage.SelectedValueIndex := 0;
 
   ApiKeyPage := CreateInputQueryPage(
@@ -211,12 +211,12 @@ begin
     if ModeStr <> 'auto' then
     begin
       case ApiProviderPage.SelectedValueIndex of
-        0: ApiProvStr := 'anthropic';
-        1: ApiProvStr := 'openai';
-        2: ApiProvStr := 'gemini_api';
-        3: ApiProvStr := 'openai_compatible';
+        0: ApiProvStr := 'gemini_api';
+        1: ApiProvStr := 'openai_compatible';
+        2: ApiProvStr := 'anthropic';
+        3: ApiProvStr := 'openai';
       else
-        ApiProvStr := 'anthropic';
+        ApiProvStr := 'gemini_api';
       end;
 
       ApiKeyStr := Trim(ApiKeyPage.Values[0]);

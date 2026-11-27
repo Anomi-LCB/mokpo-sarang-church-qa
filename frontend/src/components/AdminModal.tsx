@@ -33,6 +33,7 @@ import {
   ShieldCheck,
   SkipForward,
   Smartphone,
+  Sparkles,
   Sun,
   Terminal,
   Trash2,
@@ -41,6 +42,7 @@ import {
   Wifi,
   WifiOff,
   X,
+  Zap,
 } from 'lucide-react';
 import { api, authHeaders, triggerTicketDownload } from '../api';
 import { cacheFormPdfBlob, countCachedFormPdfs, saveOfflineBundle } from '../offlineStore';
@@ -64,6 +66,7 @@ import type {
   NetworkReachability,
   NetworkSummary,
   Notebook,
+  OllamaStatus,
   UpdateCheckResponse,
 } from '../types';
 import { AdminPinConfirmModal } from './AdminPinConfirmModal';
@@ -119,6 +122,8 @@ interface Props {
   onDisableFormsPanelChange: (disabled: boolean) => void;
   citationDisplayMode?: 'inline' | 'popup';
   onCitationDisplayModeChange?: (mode: 'inline' | 'popup') => void;
+  tokenSaverMode?: boolean;
+  onTokenSaverModeChange?: (enabled: boolean) => void;
   themeMode: ThemeMode;
   onThemeModeChange: (mode: ThemeMode) => void;
   onNotebooksChanged: (selectId?: string) => void;
@@ -138,6 +143,8 @@ export const AdminModal: React.FC<Props> = ({
   onDisableFormsPanelChange,
   citationDisplayMode = 'inline',
   onCitationDisplayModeChange,
+  tokenSaverMode = false,
+  onTokenSaverModeChange,
   themeMode,
   onThemeModeChange,
   onNotebooksChanged,
@@ -174,6 +181,14 @@ export const AdminModal: React.FC<Props> = ({
   // Engine v4.0 & Local ONNX Neural Pack state
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [reindexJob, setReindexJob] = useState<{ id: string; progress: number; message: string; status: string } | null>(null);
+
+  // Free AI Quick-Connect Hub (Free Gemini + 1-Click Local Ollama)
+  const [freeAiTab, setFreeAiTab] = useState<'gemini' | 'ollama'>('gemini');
+  const [quickGeminiKey, setQuickGeminiKey] = useState('');
+  const [connectingGemini, setConnectingGemini] = useState(false);
+  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
+  const [selectedOllamaModel, setSelectedOllamaModel] = useState('gemma3:4b');
+  const [ollamaBusy, setOllamaBusy] = useState(false);
 
   // Opt-In Auto-Update state
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
@@ -300,6 +315,104 @@ export const AdminModal: React.FC<Props> = ({
     void countCachedFormPdfs().then(setCachedPdfCount);
   }, []);
 
+  // Poll Ollama 1-click installation/pull progress while running
+  useEffect(() => {
+    const st = ollamaStatus?.setup_state?.status;
+    if (st !== 'installing' && st !== 'starting' && st !== 'pulling') return;
+    const timer = window.setInterval(() => {
+      void api
+        .getOllamaStatus()
+        .then((next) => {
+          setOllamaStatus(next);
+          if (next.setup_state.status === 'ready') {
+            setMsg(next.setup_state.message || '로컬 무료 AI 준비가 완료되었습니다!');
+            void api.getCliSettings().then(setCli).catch(() => {});
+          } else if (next.setup_state.status === 'error' && next.setup_state.error) {
+            setMsg(next.setup_state.error);
+          }
+        })
+        .catch(() => {});
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [ollamaStatus?.setup_state?.status]);
+
+  const handleQuickConnectGemini = async () => {
+    const cleanKey = quickGeminiKey.trim();
+    if (!cleanKey || connectingGemini) return;
+    setConnectingGemini(true);
+    setMsg('');
+    try {
+      const res = await api.quickConnectGemini({ api_key: cleanKey, model: 'gemini-2.5-flash', connection_mode: 'api' });
+      setMsg(res.message);
+      if (res.ok) {
+        setQuickGeminiKey('');
+        await loadAll();
+      }
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '무료 Gemini 연결 중 오류가 발생했습니다.');
+    } finally {
+      setConnectingGemini(false);
+    }
+  };
+
+  const handleSwitchToGeminiCli = async () => {
+    if (!cli || busyAction) return;
+    setBusyAction(true);
+    setMsg('');
+    try {
+      await api.updateCliSettings({
+        connection_mode: 'cli',
+        provider: 'gemini',
+        model: '',
+        api_provider: apiProvider,
+        api_model: apiModel,
+        api_base_url: apiBaseUrl,
+        max_concurrent: maxConcurrent,
+        custom_public_url: customPublicUrl,
+        cli_failover_enabled: cliFailover,
+        default_double_verify: defaultDoubleVerify,
+        default_chat_shared: defaultChatShared,
+        audit_log_enabled: auditLogEnabled,
+      });
+      await loadAll();
+      setMsg('무료 구글 로그인 기반 Gemini CLI로 전환되었습니다!');
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Gemini CLI 전환 실패');
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleOllamaSetup = async () => {
+    if (ollamaBusy) return;
+    setOllamaBusy(true);
+    setMsg('');
+    try {
+      const res = await api.setupOllama(selectedOllamaModel);
+      setOllamaStatus((prev) => (prev ? { ...prev, setup_state: res.setup_state } : prev));
+      setMsg(`로컬 무료 AI(${selectedOllamaModel}) 자동 설치·다운로드를 시작했습니다.`);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '로컬 AI 자동 준비 실패');
+    } finally {
+      setOllamaBusy(false);
+    }
+  };
+
+  const handleOllamaActivate = async (targetModel = selectedOllamaModel) => {
+    if (ollamaBusy) return;
+    setOllamaBusy(true);
+    setMsg('');
+    try {
+      const res = await api.activateOllama(targetModel);
+      setMsg(res.message);
+      await loadAll();
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '로컬 AI 연결 실패');
+    } finally {
+      setOllamaBusy(false);
+    }
+  };
+
   const handleSyncOfflineIndex = async () => {
     if (!activeNotebook) return;
     setBusyAction(true);
@@ -351,15 +464,22 @@ export const AdminModal: React.FC<Props> = ({
     setLoading(true);
     try {
       const nbId = activeNotebook?.id || 'mokpo-sarang-church';
-      const [net, cliCfg, upd, engSt] = await Promise.all([
+      const [net, cliCfg, upd, engSt, ollamaSt] = await Promise.all([
         api.getNetwork(),
         api.getCliSettings(),
         api.checkUpdates(false).catch(() => null),
         api.getEngineStatus(nbId).catch(() => null),
+        api.getOllamaStatus().catch(() => null),
       ]);
       setNetwork(net);
       setCli(cliCfg);
       if (engSt) setEngineStatus(engSt);
+      if (ollamaSt) {
+        setOllamaStatus(ollamaSt);
+        setSelectedOllamaModel((prev) =>
+          prev || ollamaSt.installed_models[0]?.name || ollamaSt.recommended_default || 'gemma3:4b'
+        );
+      }
       setConnectionMode(cliCfg.connection_mode || 'auto');
       setProvider(cliCfg.provider);
       setModel(cliCfg.model || '');
@@ -1993,6 +2113,26 @@ export const AdminModal: React.FC<Props> = ({
                   </div>
                 </div>
 
+                <label className="flex cursor-pointer items-center justify-between gap-3 border-b border-black/[0.06] pb-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <p className="text-xs font-semibold text-[#18181b]">토큰 절약 모드 (0원 원문 우선)</p>
+                      <span className="chip-nowrap rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                        토큰 80~90% 절감
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-[#71717a]">
+                      질문하면 토큰 0원으로 원문 조항을 즉시 먼저 찾고, 필요할 때만 답변의 [AI로 깔끔하게 정리] 버튼을 눌러 AI를 호출합니다
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={tokenSaverMode}
+                    onChange={(e) => onTokenSaverModeChange?.(e.target.checked)}
+                    className="h-4 w-4 shrink-0 accent-[#0f4c81]"
+                  />
+                </label>
+
                 <label className="flex cursor-pointer items-center justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold text-[#18181b]">오른쪽 서식·표 창 완전히 끄기</p>
@@ -2020,6 +2160,283 @@ export const AdminModal: React.FC<Props> = ({
                     실행 {cli.queue.active} / 대기 {cli.queue.queued} (최대 {cli.queue.max_concurrent})
                   </span>
                 </div>
+              </div>
+
+              {/* Free AI Quick-Connect Hub (0-Won Google Gemini & 100% Free Offline Local Ollama) */}
+              <div className="space-y-3 rounded-xl border border-[#0f4c81]/25 bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Sparkles className="h-3.5 w-3.5 text-[#0f4c81]" />
+                      <p className="text-xs font-semibold text-[#18181b]">무료 AI 간편 연결 (0원으로 시작)</p>
+                      <span className="chip-nowrap rounded-full bg-[#0f4c81]/10 px-2 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                        유료 구독 불필요
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-[#71717a]">
+                      유료 AI 구독 없이도 구글 무료 Gemini 또는 PC 내장 무료 로컬 AI로 NotebookLM처럼 자연스러운 요약 답변을 받을 수 있습니다.
+                    </p>
+                  </div>
+                  <div className="inline-flex rounded-lg bg-[#f0f0ee] p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setFreeAiTab('gemini')}
+                      className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                        freeAiTab === 'gemini'
+                          ? 'bg-white text-[#0f4c81] shadow-2xs'
+                          : 'text-[#71717a] hover:text-[#18181b]'
+                      }`}
+                    >
+                      <Zap className="h-3 w-3" />
+                      <span>무료 Google Gemini</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFreeAiTab('ollama')}
+                      className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                        freeAiTab === 'ollama'
+                          ? 'bg-white text-[#18181b] shadow-2xs'
+                          : 'text-[#71717a] hover:text-[#18181b]'
+                      }`}
+                    >
+                      <HardDrive className="h-3 w-3" />
+                      <span>오프라인 로컬 AI (평생 0원)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {freeAiTab === 'gemini' ? (
+                  <div className="space-y-3 rounded-xl border border-black/[0.07] bg-[#fafaf9] p-3.5">
+                    <div className="grid grid-cols-1 gap-2 text-[11px] text-[#3f3f46] sm:grid-cols-3">
+                      <div className="rounded-lg border border-black/[0.06] bg-white p-2.5">
+                        <p className="font-semibold text-[#18181b]">1단계 · 무료 키 페이지 열기</p>
+                        <p className="mt-0.5 text-[#71717a]">카드 등록 없이 구글 계정 로그인만 하면 됩니다.</p>
+                        <a
+                          href="https://aistudio.google.com/apikey"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="chip-nowrap mt-2 inline-flex items-center gap-1 rounded-md bg-[#0f4c81] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#0c3d68]"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          <span>Google AI Studio 열기</span>
+                        </a>
+                      </div>
+                      <div className="rounded-lg border border-black/[0.06] bg-white p-2.5">
+                        <p className="font-semibold text-[#18181b]">2단계 · API 키 만들기</p>
+                        <p className="mt-0.5 text-[#71717a]">
+                          화면의 <strong>API 키 만들기(Create API key)</strong>를 눌러 생성된 키를 복사하세요.
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-black/[0.06] bg-white p-2.5">
+                        <p className="font-semibold text-[#18181b]">3단계 · 붙여넣기 후 완료</p>
+                        <p className="mt-0.5 text-[#71717a]">
+                          하루 수백 회 무료 · 행정실 PC 1대만 연결하면 팀원 전원 무료로 사용합니다.
+                        </p>
+                      </div>
+                    </div>
+
+                    {isAdmin && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="password"
+                          value={quickGeminiKey}
+                          onChange={(e) => setQuickGeminiKey(e.target.value)}
+                          placeholder="복사한 무료 Gemini API 키 붙여넣기 (AIza...)"
+                          aria-label="무료 Gemini API 키 입력"
+                          className="min-w-[220px] flex-1 rounded-lg border border-black/[0.12] bg-white px-3 py-2 text-xs outline-none focus:border-[#0f4c81]"
+                        />
+                        <button
+                          type="button"
+                          disabled={connectingGemini || quickGeminiKey.trim().length < 8}
+                          onClick={() => void handleQuickConnectGemini()}
+                          className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-45"
+                        >
+                          {connectingGemini ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <PlugZap className="h-3.5 w-3.5" />
+                          )}
+                          <span>무료 Gemini 바로 연결</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Optional Gemini CLI (Google Login ~1,000 free requests/day) */}
+                    {(() => {
+                      const gemCli = cli.providers.find((p) => p.id === 'gemini');
+                      return (
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-black/[0.06] pt-2.5 text-[11px] text-[#52525b]">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <Terminal className="h-3.5 w-3.5 shrink-0 text-[#0f4c81]" />
+                            <span className="truncate">
+                              <strong>구글 로그인 무료 CLI (일 ~1,000회):</strong>{' '}
+                              {gemCli?.available ? '이 PC에 Gemini CLI가 설치되어 있습니다.' : '설치 시 키 없이 구글 로그인으로 무료 사용'}
+                            </span>
+                          </div>
+                          {gemCli?.available && isAdmin ? (
+                            <button
+                              type="button"
+                              disabled={busyAction}
+                              onClick={() => void handleSwitchToGeminiCli()}
+                              className="chip-nowrap rounded-md border border-[#0f4c81]/30 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#0f4c81] hover:bg-[#0f4c81]/[0.06]"
+                            >
+                              Gemini CLI로 바로 전환
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => copyText('gem_cli_cmd', 'npm install -g @google/gemini-cli')}
+                              className="chip-nowrap inline-flex items-center gap-1 rounded-md border border-black/[0.1] bg-white px-2 py-1 text-[10.5px] font-medium text-[#3f3f46] hover:bg-[#f7f7f5]"
+                            >
+                              {copiedKey === 'gem_cli_cmd' ? (
+                                <Check className="h-3 w-3 text-emerald-600" />
+                              ) : (
+                                <Copy className="h-3 w-3" />
+                              )}
+                              <span>{copiedKey === 'gem_cli_cmd' ? '명령어 복사됨' : '설치 명령어 복사'}</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                ) : (
+                  <div className="space-y-3 rounded-xl border border-black/[0.07] bg-[#fafaf9] p-3.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`chip-nowrap rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
+                            ollamaStatus?.running
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : ollamaStatus?.installed
+                                ? 'bg-amber-100 text-amber-900'
+                                : 'bg-zinc-200 text-zinc-700'
+                          }`}
+                        >
+                          {ollamaStatus?.running
+                            ? '로컬 AI 엔진 실행 중'
+                            : ollamaStatus?.installed
+                              ? '엔진 설치됨 (대기)'
+                              : '미설치 · 1클릭 자동 설치 지원'}
+                        </span>
+                        {ollamaStatus?.ram_gb ? (
+                          <span className="text-[#71717a]">내 PC 메모리 {ollamaStatus.ram_gb}GB</span>
+                        ) : null}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void api.getOllamaStatus().then(setOllamaStatus).catch(() => {})}
+                        className="chip-nowrap inline-flex items-center gap-1 rounded-md border border-black/[0.09] bg-white px-2 py-1 text-[10.5px] font-medium text-[#52525b] hover:bg-[#f7f7f5]"
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                        <span>상태 새로고침</span>
+                      </button>
+                    </div>
+
+                    <p className="text-[11px] leading-relaxed text-[#52525b]">
+                      PC 안에 무료 오픈소스 한국어 AI를 설치하면 <strong>토큰 비용 0원 · 인터넷 불필요 · 교회 문서 외부 유출 0%</strong>로 평생 사용할 수 있습니다. (단, 그래픽카드 없는 사무용 PC에서는 답변에 5~15초 정도 걸릴 수 있습니다.)
+                    </p>
+
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {(ollamaStatus?.recommended_models || []).map((m) => {
+                        const isInstalled = (ollamaStatus?.installed_models || []).some(
+                          (im) => im.name === m.id || im.name === `${m.id}:latest`
+                        );
+                        const selected = selectedOllamaModel === m.id;
+                        return (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => setSelectedOllamaModel(m.id)}
+                            className={`rounded-xl border p-2.5 text-left transition ${
+                              selected
+                                ? 'border-[#0f4c81] bg-white ring-1 ring-[#0f4c81]'
+                                : 'border-black/[0.08] bg-white hover:bg-[#f7f7f5]'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-1">
+                              <span className="text-xs font-semibold text-[#18181b]">{m.name}</span>
+                              <div className="flex items-center gap-1">
+                                <span className="chip-nowrap rounded bg-[#f4f4f2] px-1.5 py-0.5 text-[10px] font-medium text-[#52525b]">
+                                  {m.size_label}
+                                </span>
+                                {isInstalled && (
+                                  <span className="chip-nowrap rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
+                                    설치됨
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <p className="mt-1 text-[10.5px] leading-snug text-[#71717a]">{m.desc}</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {ollamaStatus?.setup_state &&
+                      (ollamaStatus.setup_state.status === 'installing' ||
+                        ollamaStatus.setup_state.status === 'starting' ||
+                        ollamaStatus.setup_state.status === 'pulling') && (
+                        <div className="space-y-1 rounded-lg border border-[#0f4c81]/20 bg-white p-2.5">
+                          <div className="flex items-center justify-between text-[11px] font-medium text-[#0f4c81]">
+                            <span className="truncate">{ollamaStatus.setup_state.message}</span>
+                            <span className="tabular-nums">{ollamaStatus.setup_state.progress}%</span>
+                          </div>
+                          <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/[0.08]">
+                            <div
+                              className="h-full rounded-full bg-[#0f4c81] transition-all"
+                              style={{ width: `${Math.max(4, ollamaStatus.setup_state.progress)}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                    {ollamaStatus?.setup_state?.status === 'error' && ollamaStatus.setup_state.error && (
+                      <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+                        {ollamaStatus.setup_state.error}
+                      </div>
+                    )}
+
+                    {isAdmin && (() => {
+                      const alreadyInstalled = (ollamaStatus?.installed_models || []).some(
+                        (im) => im.name === selectedOllamaModel || im.name === `${selectedOllamaModel}:latest`
+                      );
+                      const isSettingUp =
+                        ollamaStatus?.setup_state?.status === 'installing' ||
+                        ollamaStatus?.setup_state?.status === 'starting' ||
+                        ollamaStatus?.setup_state?.status === 'pulling';
+                      return (
+                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                          {alreadyInstalled ? (
+                            <button
+                              type="button"
+                              disabled={ollamaBusy || isSettingUp}
+                              onClick={() => void handleOllamaActivate(selectedOllamaModel)}
+                              className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-50"
+                            >
+                              {ollamaBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}
+                              <span>{selectedOllamaModel} 무료 로컬 AI 바로 연결</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={ollamaBusy || isSettingUp}
+                              onClick={() => void handleOllamaSetup()}
+                              className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#18181b] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#27272a] disabled:opacity-50"
+                            >
+                              {ollamaBusy || isSettingUp ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Download className="h-3.5 w-3.5" />
+                              )}
+                              <span>{selectedOllamaModel} 1클릭 설치 · 무료 연결</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
               </div>
 
               {/* Smart Search Engine & Optional Meaning Search Add-on (Plain Korean UX) */}

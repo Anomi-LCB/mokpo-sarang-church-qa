@@ -464,6 +464,16 @@ def main() -> None:
             dpage.wait_for_selector("text=근거 원문 표시 방식", timeout=6000)
             dpage.wait_for_selector("text=하단 열기·닫기", timeout=5000)
             dpage.wait_for_selector("text=팝업창으로 보기", timeout=5000)
+            dpage.wait_for_selector("text=토큰 절약 모드 (0원 원문 우선)", timeout=5000)
+            dpage.wait_for_selector("text=무료 AI 간편 연결 (0원으로 시작)", timeout=5000)
+            dpage.wait_for_selector("text=Google AI Studio 열기", timeout=5000)
+            dpage.click('div[data-modal="settings"] button:has-text("오프라인 로컬 AI (평생 0원)")')
+            dpage.wait_for_selector("text=Gemma 3 4B (추천)", timeout=5000)
+            dpage.wait_for_timeout(150)
+            audit_geometry(dpage, "Desktop-1440x900-FreeLocalOllama")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_ollama.png"))
+            dpage.click('div[data-modal="settings"] button:has-text("무료 Google Gemini")')
+            dpage.wait_for_timeout(120)
             dpage.click('div[data-modal="settings"] button:has-text("팝업창으로 보기")')
             dpage.wait_for_timeout(120)
             assert dpage.evaluate("() => localStorage.getItem('church_search_citation_mode')") == "popup"
@@ -499,7 +509,7 @@ def main() -> None:
                 }"""
             )
             print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.2.5", f"Expected v4.2.5, got {eng_status}"
+            assert eng_status.get("version") == "4.3.0", f"Expected v4.3.0, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")

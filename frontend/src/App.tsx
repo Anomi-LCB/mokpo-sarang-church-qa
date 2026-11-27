@@ -187,6 +187,13 @@ export function App() {
       return 'inline';
     }
   });
+  const [tokenSaverMode, setTokenSaverMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('church_search_token_saver') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadThemeMode());
   const [isDark, setIsDark] = useState<boolean>(() => resolveIsDark(loadThemeMode()));
   const [profileName, setProfileName] = useState<string>(() => loadUserProfile().name || '');
@@ -252,6 +259,15 @@ export function App() {
     setCitationDisplayMode(next);
     try {
       localStorage.setItem('church_search_citation_mode', next);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleTokenSaverMode = (enabled: boolean) => {
+    setTokenSaverMode(enabled);
+    try {
+      localStorage.setItem('church_search_token_saver', enabled ? '1' : '0');
     } catch {
       // ignore
     }
@@ -778,32 +794,11 @@ export function App() {
     setSelectedDocIds(all ? allShelfDocs.filter((d) => d.status === 'ready').map((d) => d.id) : []);
   };
 
-  const handleSend = async (query: string) => {
-    if (busy) return;
-    setBusy(true);
-    const effMode = instantMode || isOfflineMode ? 'instant' : mode;
-    const userMsg: ChatMessage = {
-      id: `u_${Date.now()}`,
-      role: 'user',
-      content: query,
-      mode: effMode,
-      citations: [],
-      forms: [],
-      author_label: auth?.label || '',
-    };
-    const aiMsgId = `a_${Date.now() + 1}`;
-    const aiPlaceholder: ChatMessage = {
-      id: aiMsgId,
-      role: 'assistant',
-      content: '',
-      mode: effMode,
-      citations: [],
-      forms: [],
-      streaming: true,
-      statusText: instantMode || isOfflineMode ? '오프라인 원문 즉시 검색 중...' : '근거 조항 검색 중...',
-    };
-    setMessages((prev) => [...prev, userMsg, aiPlaceholder]);
-
+  const streamChatIntoMessage = async (
+    aiMsgId: string,
+    query: string,
+    opts: { instant: boolean; skipUserMessage: boolean }
+  ) => {
     const updateAi = (patch: Partial<ChatMessage>) => {
       setMessages((prev) => prev.map((m) => (m.id === aiMsgId ? { ...m, ...patch } : m)));
     };
@@ -851,7 +846,6 @@ export function App() {
 
     if ((isOfflineMode || (typeof navigator !== 'undefined' && !navigator.onLine)) && offlineBundle) {
       runOfflineAnswer(offlineBundle);
-      setBusy(false);
       return;
     }
 
@@ -866,8 +860,9 @@ export function App() {
           query,
           doc_ids: selectedDocIds,
           mode,
-          instant: instantMode,
-          double_verify: doubleVerify && !instantMode,
+          instant: opts.instant,
+          double_verify: doubleVerify && !opts.instant,
+          skip_user_message: opts.skipUserMessage,
         }),
       });
       if (!res.ok || !res.body) {
@@ -966,6 +961,61 @@ export function App() {
           content: `요청 처리 중 오류가 발생했습니다: ${err instanceof Error ? err.message : '알 수 없는 오류'}`,
         });
       }
+    }
+  };
+
+  const handleSend = async (query: string) => {
+    if (busy) return;
+    setBusy(true);
+    const useInstant = instantMode || tokenSaverMode || isOfflineMode;
+    const effMode = useInstant ? 'instant' : mode;
+    const userMsg: ChatMessage = {
+      id: `u_${Date.now()}`,
+      role: 'user',
+      content: query,
+      mode: effMode,
+      citations: [],
+      forms: [],
+      author_label: auth?.label || '',
+    };
+    const aiMsgId = `a_${Date.now() + 1}`;
+    const aiPlaceholder: ChatMessage = {
+      id: aiMsgId,
+      role: 'assistant',
+      content: '',
+      mode: effMode,
+      citations: [],
+      forms: [],
+      streaming: true,
+      statusText: useInstant ? '토큰 0원 원문 즉시 검색 중...' : '근거 조항 검색 중...',
+    };
+    setMessages((prev) => [...prev, userMsg, aiPlaceholder]);
+    try {
+      await streamChatIntoMessage(aiMsgId, query, { instant: useInstant, skipUserMessage: false });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUpgradeMessageWithAi = async (msgId: string, query: string) => {
+    if (busy || isOfflineMode || !query.trim()) return;
+    setBusy(true);
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId
+          ? {
+              ...m,
+              mode,
+              content: '',
+              streaming: true,
+              statusText: '확보된 원문 근거로 AI 정밀 답변 생성 중...',
+              verification: undefined,
+            }
+          : m
+      )
+    );
+    try {
+      await streamChatIntoMessage(msgId, query, { instant: false, skipUserMessage: true });
     } finally {
       setBusy(false);
     }
@@ -1406,6 +1456,8 @@ export function App() {
             messages={messages}
             mode={mode}
             instantMode={instantMode || isOfflineMode}
+            tokenSaverMode={tokenSaverMode}
+            isOfflineMode={isOfflineMode}
             doubleVerify={doubleVerify}
             selectedDocCount={selectedDocIds.length}
             totalDocCount={allShelfDocs.length}
@@ -1418,8 +1470,10 @@ export function App() {
             onInstantToggle={(v) => {
               if (!isOfflineMode) setInstantMode(v);
             }}
+            onTokenSaverToggle={handleTokenSaverMode}
             onDoubleVerifyToggle={setDoubleVerify}
             onSend={(q) => void handleSend(q)}
+            onUpgradeWithAi={(msgId, q) => void handleUpgradeMessageWithAi(msgId, q)}
             onOpenViewer={(docId, pageNo, highlightText) =>
               setViewerTarget({ docId, pageNo, highlightText })
             }
@@ -1624,6 +1678,8 @@ export function App() {
             onDisableFormsPanelChange={handleDisableFormsPanel}
             citationDisplayMode={citationDisplayMode}
             onCitationDisplayModeChange={handleCitationDisplayMode}
+            tokenSaverMode={tokenSaverMode}
+            onTokenSaverModeChange={handleTokenSaverMode}
             themeMode={themeMode}
             onThemeModeChange={handleThemeModeChange}
             onNotebooksChanged={(sel) => void loadNotebooks(sel, false)}

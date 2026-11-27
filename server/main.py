@@ -63,6 +63,7 @@ from server.cli_providers import (
 from server.discovery import DiscoveryResponder
 from server.event_bus import RealtimeEventBus
 from server.groups_routes import router as groups_router
+from server.ollama_manager import OllamaManager
 from server.queue_manager import QueryQueueManager
 from server.std_routes import router as std_router
 from server.tunnel import NetworkTunnelManager, probe_url_health
@@ -103,6 +104,7 @@ class ChatStreamReq(BaseModel):
     mode: str = Field(default="auto")  # auto | practical | strict | advisory
     instant: bool = False
     double_verify: bool = False
+    skip_user_message: bool = False
     provider: str | None = None
 
 
@@ -163,6 +165,16 @@ class AiConnectionTestReq(BaseModel):
     api_key: str | None = None
     model: str | None = None
     base_url: str | None = None
+
+
+class QuickGeminiConnectReq(BaseModel):
+    api_key: str = Field(..., min_length=8, max_length=300)
+    model: str = Field(default="gemini-2.5-flash", max_length=80)
+    connection_mode: str = Field(default="api")  # api | auto
+
+
+class OllamaModelReq(BaseModel):
+    model: str = Field(default="gemma3:4b", min_length=2, max_length=100)
 
 
 class UpdateSettingsReq(BaseModel):
@@ -273,6 +285,7 @@ def create_app(
         app.state.updater = updater
         app.state.events = RealtimeEventBus()
         app.state.discovery = discovery
+        app.state.ollama = OllamaManager()
         app.state.jobs = {}
         app.state.offline_bundle_cache = {}
         app.state.answer_cache = TwoLayerAnswerCache()
@@ -1134,14 +1147,15 @@ def create_app(
         )
         history = db.get_session_messages(session_id)
         effective_mode = "instant" if body.instant else body.mode
-        db.add_message(
-            session_id,
-            "user",
-            body.query,
-            mode=effective_mode,
-            author_label=user.label,
-            author_owner_id=user.owner_id,
-        )
+        if not body.skip_user_message:
+            db.add_message(
+                session_id,
+                "user",
+                body.query,
+                mode=effective_mode,
+                author_label=user.label,
+                author_owner_id=user.owner_id,
+            )
         events.publish("chat_updated", session_id=session_id, group_id=active_group_id, actor_label=user.label)
 
         ai_cfg = load_ai_config(db)
@@ -1517,7 +1531,12 @@ def create_app(
         sel_api = next((a for a in api_providers if a["id"] == ai_cfg.api_provider), None)
         if ai_cfg.connection_mode == "api":
             if sel_api and sel_api["configured"]:
-                active_summary = f"API 직접 연결 · {sel_api['name']} ({ai_cfg.effective_api_model()})"
+                if ai_cfg.api_provider == "gemini_api":
+                    active_summary = f"무료 Google Gemini ({ai_cfg.effective_api_model()})"
+                elif ai_cfg.api_provider == "openai_compatible" and "11434" in ai_cfg.effective_api_base_url():
+                    active_summary = f"로컬 무료 AI · Ollama ({ai_cfg.effective_api_model()})"
+                else:
+                    active_summary = f"API 직접 연결 · {sel_api['name']} ({ai_cfg.effective_api_model()})"
             else:
                 active_summary = "API 직접 연결 (API 키 미입력 — 오프라인 원문 검색 동작 중)"
         elif ai_cfg.connection_mode == "cli":
@@ -1607,6 +1626,105 @@ def create_app(
             override_model=body.model,
             override_base_url=body.base_url,
         )
+
+    @app.post("/api/admin/ai/quick-connect-gemini")
+    async def quick_connect_gemini_route(
+        body: QuickGeminiConnectReq,
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        """1-click free Google Gemini API key validation, DPAPI encryption, and activation."""
+        db: Database = request.app.state.db
+        ai_cfg = load_ai_config(db)
+        clean_key = body.api_key.strip()
+        clean_model = (body.model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        probe = await test_ai_connection(
+            ai_config=ai_cfg,
+            mode="api",
+            provider_id="gemini_api",
+            override_api_key=clean_key,
+            override_model=clean_model,
+        )
+        if not probe.get("ok"):
+            return {
+                "ok": False,
+                "message": probe.get("message") or "Gemini API 키 연결에 실패했습니다. 키를 다시 확인해 주세요.",
+                "latency_ms": probe.get("latency_ms", 0),
+            }
+        save_ai_api_key(db, "gemini_api", clean_key)
+        conn_mode = body.connection_mode if body.connection_mode in {"api", "auto"} else "api"
+        db.set_setting("ai_connection_mode", conn_mode)
+        db.set_setting("ai_api_provider", "gemini_api")
+        db.set_setting("ai_api_model", clean_model)
+        db.set_setting("ai_api_base_url", "")
+        db.log_audit(
+            "settings_updated",
+            user.role,
+            user.label,
+            get_client_ip(request),
+            f"무료 Gemini 1클릭 연결 완료 ({clean_model})",
+        )
+        return {
+            "ok": True,
+            "model": clean_model,
+            "latency_ms": probe.get("latency_ms", 0),
+            "message": f"무료 Google Gemini({clean_model}) 연결 완료! ({probe.get('latency_ms', 0)}ms)",
+        }
+
+    @app.get("/api/admin/ollama/status")
+    async def get_ollama_status_route(
+        request: Request,
+        _: AuthUser = Depends(require_user),
+    ) -> dict[str, Any]:
+        ollama: OllamaManager = request.app.state.ollama
+        return await ollama.get_status()
+
+    @app.post("/api/admin/ollama/setup")
+    async def setup_ollama_route(
+        body: OllamaModelReq,
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        ollama: OllamaManager = request.app.state.ollama
+        db: Database = request.app.state.db
+        res = ollama.start_setup(db, body.model)
+        db.log_audit(
+            "settings_updated",
+            user.role,
+            user.label,
+            get_client_ip(request),
+            f"로컬 무료 AI(Ollama) 자동 준비 시작 ({body.model})",
+        )
+        return res
+
+    @app.post("/api/admin/ollama/activate")
+    async def activate_ollama_route(
+        body: OllamaModelReq,
+        request: Request,
+        user: AuthUser = Depends(require_admin),
+    ) -> dict[str, Any]:
+        ollama: OllamaManager = request.app.state.ollama
+        db: Database = request.app.state.db
+        running = await ollama.ensure_running(wait_sec=12)
+        if not running:
+            raise HTTPException(
+                status_code=400,
+                detail="로컬 Ollama 엔진이 실행 중이지 않습니다. [1클릭 설치·연결]을 눌러 먼저 준비해 주세요.",
+            )
+        clean_model = body.model.strip()
+        ollama.activate_in_db(db, clean_model)
+        db.log_audit(
+            "settings_updated",
+            user.role,
+            user.label,
+            get_client_ip(request),
+            f"로컬 무료 AI(Ollama) 활성화 ({clean_model})",
+        )
+        return {
+            "ok": True,
+            "model": clean_model,
+            "message": f"로컬 무료 AI({clean_model})로 전환되었습니다. 이제 토큰 비용 0원으로 동작합니다.",
+        }
 
     # ---- Opt-In Auto-Update (GitHub Releases + Custom Feed + Offline Patch ZIP) ----
     @app.get("/api/updates/check")

@@ -21,6 +21,7 @@ import {
   Loader2,
   Scale,
   ShieldCheck,
+  Sparkles,
   Users,
   X,
   Zap,
@@ -35,6 +36,8 @@ interface Props {
   messages: ChatMessage[];
   mode: AnswerMode;
   instantMode: boolean;
+  tokenSaverMode?: boolean;
+  isOfflineMode?: boolean;
   doubleVerify: boolean;
   selectedDocCount: number;
   totalDocCount: number;
@@ -42,8 +45,10 @@ interface Props {
   busy: boolean;
   onModeChange: (m: AnswerMode) => void;
   onInstantToggle: (v: boolean) => void;
+  onTokenSaverToggle?: (v: boolean) => void;
   onDoubleVerifyToggle: (v: boolean) => void;
   onSend: (query: string) => void;
+  onUpgradeWithAi?: (msgId: string, query: string) => void;
   onOpenViewer: (docId: string, pageNo: number, highlightText?: string) => void;
   onOpenAutofill: (form: FormItem) => void;
 }
@@ -73,12 +78,14 @@ const MOBILE_MODE_OPTS: Array<{ id: AnswerMode; label: string; desc: string }> =
 const ChatComposer = memo<{
   busy: boolean;
   instantMode: boolean;
+  tokenSaverMode: boolean;
   doubleVerify: boolean;
   selectedDocCount: number;
   onInstantToggle: (v: boolean) => void;
+  onTokenSaverToggle?: (v: boolean) => void;
   onDoubleVerifyToggle: (v: boolean) => void;
   onSend: (query: string) => void;
-}>(({ busy, instantMode, doubleVerify, selectedDocCount, onInstantToggle, onDoubleVerifyToggle, onSend }) => {
+}>(({ busy, instantMode, tokenSaverMode, doubleVerify, selectedDocCount, onInstantToggle, onTokenSaverToggle, onDoubleVerifyToggle, onSend }) => {
   const [input, setInput] = useState('');
 
   const submit = (e?: React.FormEvent) => {
@@ -95,19 +102,25 @@ const ChatComposer = memo<{
         <div className="flex flex-wrap items-center gap-1.5 px-1">
           <button
             type="button"
-            onClick={() => onInstantToggle(!instantMode)}
-            title="AI 호출 없이 0.05초 만에 오프라인 원문 조항을 바로 찾습니다"
+            onClick={() => {
+              if (tokenSaverMode && onTokenSaverToggle) {
+                onTokenSaverToggle(false);
+              } else {
+                onInstantToggle(!instantMode);
+              }
+            }}
+            title="토큰 0원으로 0.04초 만에 원문 조항을 먼저 찾고, 필요할 때만 [AI로 정리하기]를 누를 수 있습니다"
             className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
-              instantMode
-                ? 'bg-amber-100 text-amber-900 ring-1 ring-amber-300/80'
+              instantMode || tokenSaverMode
+                ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-300/80'
                 : 'text-[#71717a] hover:bg-black/[0.045] hover:text-[#18181b]'
             }`}
           >
             <Zap className="h-3 w-3" />
-            <span>즉시 원문 검색</span>
+            <span>{tokenSaverMode ? '토큰 절약 (0원 우선)' : '즉시 원문 검색'}</span>
           </button>
 
-          {!instantMode && (
+          {!instantMode && !tokenSaverMode && (
             <button
               type="button"
               onClick={() => onDoubleVerifyToggle(!doubleVerify)}
@@ -139,8 +152,8 @@ const ChatComposer = memo<{
               placeholder={
                 selectedDocCount === 0
                   ? '검색 자료를 먼저 선택하세요'
-                  : instantMode
-                    ? '키워드·조항 즉시 검색...'
+                  : instantMode || tokenSaverMode
+                    ? '0원 즉시 원문 검색 (필요 시 결과에서 1클릭 AI 정리)...'
                     : '법규·행정 규정에 대해 질문하세요...'
               }
               disabled={selectedDocCount === 0}
@@ -168,6 +181,8 @@ export const ChatPanel: React.FC<Props> = memo(({
   messages,
   mode,
   instantMode,
+  tokenSaverMode = false,
+  isOfflineMode = false,
   doubleVerify,
   selectedDocCount,
   totalDocCount,
@@ -175,8 +190,10 @@ export const ChatPanel: React.FC<Props> = memo(({
   busy,
   onModeChange,
   onInstantToggle,
+  onTokenSaverToggle,
   onDoubleVerifyToggle,
   onSend,
+  onUpgradeWithAi,
   onOpenViewer,
   onOpenAutofill,
 }) => {
@@ -442,6 +459,32 @@ export const ChatPanel: React.FC<Props> = memo(({
                       {!msg.streaming && msg.content && (
                         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 pt-1">
                           <div className="flex flex-wrap items-center gap-1.5">
+                            {!isOfflineMode &&
+                              onUpgradeWithAi &&
+                              msg.hasEvidence !== false &&
+                              (msg.mode === 'instant' ||
+                                msg.provider === 'local-instant' ||
+                                msg.provider === 'local-offline-fallback') && (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    let prevQuery = '';
+                                    for (let i = msgIdx - 1; i >= 0; i--) {
+                                      if (messages[i].role === 'user') {
+                                        prevQuery = messages[i].content;
+                                        break;
+                                      }
+                                    }
+                                    if (prevQuery) onUpgradeWithAi(msg.id, prevQuery);
+                                  }}
+                                  className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#0f4c81] px-2.5 py-1 text-[11.5px] font-semibold text-white transition hover:bg-[#0c3d68] disabled:opacity-45"
+                                >
+                                  <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                                  <span>AI로 깔끔하게 정리</span>
+                                </button>
+                              )}
+
                             {msg.citations.length > 0 && (
                               <button
                                 type="button"
@@ -647,9 +690,11 @@ export const ChatPanel: React.FC<Props> = memo(({
       <ChatComposer
         busy={busy}
         instantMode={instantMode}
+        tokenSaverMode={tokenSaverMode}
         doubleVerify={doubleVerify}
         selectedDocCount={selectedDocCount}
         onInstantToggle={onInstantToggle}
+        onTokenSaverToggle={onTokenSaverToggle}
         onDoubleVerifyToggle={onDoubleVerifyToggle}
         onSend={onSend}
       />

@@ -75,23 +75,23 @@ API_PROVIDER_CATALOG: list[dict[str, Any]] = [
     },
     {
         "id": "gemini_api",
-        "name": "Google Gemini API",
+        "name": "Google Gemini API (무료 티어 지원)",
         "default_base_url": "https://generativelanguage.googleapis.com/v1beta",
         "default_model": "gemini-2.5-flash",
         "presets": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
         "env_var": "GEMINI_API_KEY",
         "requires_key": True,
-        "description": "Google AI Studio Gemini API 직접 연결 (무료 티어 및 긴 문서 강점)",
+        "description": "구글 계정만으로 무료 API 키 발급(카드 불필요 · 하루 수백 회 무료 · 빠른 한국어 요약)",
     },
     {
         "id": "openai_compatible",
-        "name": "로컬 Ollama · OpenAI 호환 API",
+        "name": "로컬 무료 AI (Ollama) · 호환 API",
         "default_base_url": "http://localhost:11434/v1",
-        "default_model": "qwen2.5:7b",
-        "presets": ["qwen2.5:7b", "gemma3:12b", "llama3.1:8b", "deepseek-r1:8b"],
+        "default_model": "gemma3:4b",
+        "presets": ["gemma3:4b", "qwen2.5:3b", "qwen2.5:7b", "gemma3:12b"],
         "env_var": "CUSTOM_OPENAI_API_KEY",
         "requires_key": False,
-        "description": "PC 내장 Ollama·LM Studio(완전 오프라인 AI) 또는 OpenRouter 등 호환 엔드포인트 연결",
+        "description": "PC 내부 무료 로컬 AI(평생 토큰 0원 · 완전 오프라인 · 외부 유출 0%) 또는 OpenAI 호환 서버",
     },
 ]
 
@@ -301,10 +301,10 @@ def detect_cli_providers() -> list[CLIProviderInfo]:
         ),
         CLIProviderInfo(
             id="gemini",
-            name="Gemini CLI",
+            name="Gemini CLI (구글 로그인 무료)",
             available=bool(gemini_path),
             binary_path=gemini_path,
-            description="Google Gemini CLI 연동 (설치 시 자동 활성화)",
+            description="구글 계정 로그인만으로 일일 약 1,000회 무료 사용 가능 (설치 시 자동 감지)",
         ),
     ]
 
