@@ -15,6 +15,7 @@ import {
   FileEdit,
   FileSpreadsheet,
   FileText,
+  FileType2,
   Link2,
   Loader2,
   Scale,
@@ -591,6 +592,14 @@ export const ChatPanel: React.FC<Props> = memo(({
                                 >
                                   <FileText className="h-3 w-3" />
                                   <span>DOCX</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void triggerTicketDownload(`/api/forms/${f.id}/download/hwpx`, `${f.title}.hwpx`)}
+                                  className="chip-nowrap inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-[#71717a] hover:bg-black/[0.05] hover:text-[#18181b]"
+                                >
+                                  <FileType2 className="h-3 w-3" />
+                                  <span>HWPX</span>
                                 </button>
                                 <button
                                   type="button"

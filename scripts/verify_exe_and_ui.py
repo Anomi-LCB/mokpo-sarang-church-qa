@@ -263,35 +263,83 @@ def main() -> None:
             auto_btn = dpage.locator('header button:has-text("자동")').first
             auto_btn.hover()
             dpage.wait_for_timeout(220)
-            tip_opacity = dpage.locator('header [role="tooltip"]').first.evaluate("el => parseFloat(getComputedStyle(el).opacity)")
+            tip_opacity = auto_btn.locator('xpath=following-sibling::*[@role="tooltip"]').evaluate("el => parseFloat(getComputedStyle(el).opacity)")
             assert tip_opacity > 0.9, f"Expected mode hover tooltip opacity > 0.9, got {tip_opacity}"
+
+            # Also verify new v4.1 universal icon hover tooltip on top header!
+            grp_btn = dpage.locator('header button[aria-label="그룹 관리"]').first
+            grp_btn.hover()
+            dpage.wait_for_timeout(200)
+            grp_tip_op = grp_btn.locator('xpath=following-sibling::*[@role="tooltip"]').evaluate("el => parseFloat(getComputedStyle(el).opacity)")
+            assert grp_tip_op > 0.9, f"Expected icon hover tooltip opacity > 0.9, got {grp_tip_op}"
             dpage.mouse.move(720, 450)
             dpage.wait_for_timeout(150)
 
-            # Verify FormsVault DOCX/XLSX buttons fit inside inspector without right-edge clipping
+            # Verify FormsVault v4.1: clicking a form card reveals frosted 5-button overlay (작성·미리보기, PDF 다운, DOCX, HWPX, XLSX) with zero clipping!
+            first_form_card = dpage.locator('aside[data-panel="inspector"] div[data-form-card] div[role="button"]').first
+            first_form_card.click()
+            dpage.wait_for_selector('aside[data-panel="inspector"] div[data-form-overlay]', timeout=5000)
+            dpage.wait_for_timeout(180)
             clip_res = dpage.evaluate(
                 """() => {
                     const insp = document.querySelector('aside[data-panel="inspector"]');
-                    if (!insp) return { checked: 0, clipped: [] };
+                    const ov = insp ? insp.querySelector('div[data-form-overlay]') : null;
+                    if (!insp || !ov) return { checked: 0, found: [], clipped: [] };
                     const ir = insp.getBoundingClientRect();
                     const clipped = [];
-                    let checked = 0;
-                    for (const btn of insp.querySelectorAll('button')) {
+                    const found = [];
+                    for (const btn of ov.querySelectorAll('button')) {
                         const txt = (btn.innerText || '').trim();
-                        if (txt === 'DOCX' || txt === 'XLSX' || txt === 'PDF') {
-                            const r = btn.getBoundingClientRect();
-                            if (r.width === 0 || r.height === 0 || r.top > window.innerHeight) continue;
-                            checked++;
-                            if (r.right > ir.right - 2) {
-                                clipped.push({ txt, btnRight: Math.round(r.right), inspRight: Math.round(ir.right) });
-                            }
+                        if (!txt) continue;
+                        found.push(txt);
+                        const r = btn.getBoundingClientRect();
+                        if (r.right > ir.right - 2 || r.left < ir.left + 2) {
+                            clipped.push({ txt, btnLeft: Math.round(r.left), btnRight: Math.round(r.right), inspRight: Math.round(ir.right) });
                         }
                     }
-                    return { checked, clipped };
+                    return { checked: found.length, found, clipped };
                 }"""
             )
-            print(f"[AUDIT FormsVault-Buttons] checked={clip_res['checked']} clipped={len(clip_res['clipped'])}", flush=True)
-            assert clip_res["checked"] >= 3 and len(clip_res["clipped"]) == 0, f"FormsVault clipped buttons: {clip_res}"
+            print(f"[AUDIT FormsVault-5ActionOverlay] checked={clip_res['checked']} found={clip_res['found']} clipped={len(clip_res['clipped'])}", flush=True)
+            assert clip_res["checked"] == 5 and len(clip_res["clipped"]) == 0, f"FormsVault overlay issue: {clip_res}"
+            for expected_lbl in ("작성·미리보기", "PDF 다운", "DOCX", "HWPX", "XLSX"):
+                assert expected_lbl in clip_res["found"], f"Missing button {expected_lbl} in overlay: {clip_res['found']}"
+            audit_geometry(dpage, "Desktop-1440x900-FormsOverlay")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_forms_overlay.png"))
+            dpage.keyboard.press("Escape")
+            dpage.wait_for_timeout(150)
+
+            # Verify v4.1: Left sources area collapses cleanly to 1 single top line and expands back
+            dpage.click('aside[data-panel="sidebar"] button[aria-label="자료 공간 한 줄로 줄이기"]')
+            dpage.wait_for_timeout(180)
+            collapsed_h = dpage.locator('aside[data-panel="sidebar"] div[data-section="sources"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            print(f"[AUDIT LeftSources-Collapsed] height={collapsed_h}px", flush=True)
+            assert collapsed_h <= 42, f"Expected collapsed left sources section <= 42px (1 line), got {collapsed_h}px"
+            audit_geometry(dpage, "Desktop-1440x900-SourcesCollapsed")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_sources_collapsed.png"))
+            dpage.click('aside[data-panel="sidebar"] button[aria-label="자료 공간 펼치기"]')
+            dpage.wait_for_timeout(180)
+
+            # Verify v4.1 Top Header: '그룹' & '제보' moved left beside '표준화실', no '새 대화' in top bar, and icon hover tooltip works!
+            hdr_check = dpage.evaluate(
+                """() => {
+                    const hdr = document.querySelector('header');
+                    const stdBtn = Array.from(hdr.querySelectorAll('button')).find(b => b.innerText.includes('표준화실'));
+                    const grpBtn = hdr.querySelector('button[aria-label="그룹 관리"]');
+                    const rptBtn = hdr.querySelector('button[aria-label="버그 및 개선사항 제보"]');
+                    const newChatBtn = Array.from(hdr.querySelectorAll('button')).find(b => b.innerText.includes('새 대화'));
+                    return {
+                        stdRight: stdBtn ? Math.round(stdBtn.getBoundingClientRect().right) : -1,
+                        grpLeft: grpBtn ? Math.round(grpBtn.getBoundingClientRect().left) : -1,
+                        rptLeft: rptBtn ? Math.round(rptBtn.getBoundingClientRect().left) : -1,
+                        hasTopNewChat: Boolean(newChatBtn),
+                    };
+                }"""
+            )
+            print(f"[AUDIT TopHeader-Layout] {hdr_check}", flush=True)
+            assert hdr_check["hasTopNewChat"] is False, "Top bar should not have '새 대화' button!"
+            assert 0 < hdr_check["grpLeft"] < 650 and hdr_check["grpLeft"] >= hdr_check["stdRight"] - 4, f"Group button not right of 표준화실: {hdr_check}"
+            assert hdr_check["rptLeft"] > hdr_check["grpLeft"] and hdr_check["rptLeft"] < 700, f"Report button not next to 그룹: {hdr_check}"
 
             # Open v3.0 Document Library (서고) Modal & audit
             dpage.click('aside[data-panel="sidebar"] button:has-text("자료 라이브러리")')
@@ -364,28 +412,57 @@ def main() -> None:
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
             dpage.wait_for_timeout(200)
 
-            # Open Settings -> AI Engine (CLI / API selector + v4.0 Engine card) & Updates tab audits
-            dpage.click('header button:has-text("설정")')
+            # Open Settings -> Verify uniform modal height across tabs + zero tab bar clipping + plain Korean labels!
+            dpage.click('header button[aria-label="환경 설정"]')
             dpage.wait_for_selector("text=화면 · AI 엔진", timeout=8000)
-            dpage.click('div.fixed.inset-0.z-50 button:has-text("화면 · AI 엔진")')
+            dpage.click('div[data-modal="settings"] button:has-text("내 기본 정보")')
+            dpage.wait_for_selector("text=서식 자동 작성용 내 기본 정보", timeout=6000)
+            dpage.wait_for_timeout(180)
+            profile_modal_h = dpage.locator('div[data-modal="settings"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+
+            dpage.click('div[data-modal="settings"] button:has-text("화면 · AI 엔진")')
             dpage.wait_for_selector("text=AI 연결 방식 선택", timeout=6000)
-            dpage.wait_for_selector("text=내부 검색 엔진 v4.0.0", timeout=6000)
-            dpage.wait_for_selector("text=Kiwi 한국어 형태소 활성", timeout=6000)
+            dpage.wait_for_selector("text=스마트 검색 엔진", timeout=6000)
+            dpage.wait_for_selector("text=한글 정밀 분석 켜짐", timeout=6000)
+            dpage.wait_for_selector("text=고급 의미 검색 추가", timeout=6000)
             dpage.wait_for_timeout(250)
+            cli_modal_metrics = dpage.evaluate(
+                """() => {
+                    const m = document.querySelector('div[data-modal="settings"]');
+                    const tabs = document.querySelector('div[data-role="settings-tabs"]');
+                    const mr = m.getBoundingClientRect();
+                    const tr = tabs.getBoundingClientRect();
+                    return {
+                        modalH: Math.round(mr.height),
+                        tabsH: Math.round(tr.height),
+                        tabsNotClipped: tr.height >= 36 && tr.top >= mr.top,
+                    };
+                }"""
+            )
+            print(f"[AUDIT Settings-UniformHeight] profileH={profile_modal_h} cliMetrics={cli_modal_metrics}", flush=True)
+            assert abs(profile_modal_h - cli_modal_metrics["modalH"]) <= 2, f"Settings modal height changed between tabs: {profile_modal_h} vs {cli_modal_metrics['modalH']}"
+            assert cli_modal_metrics["tabsNotClipped"] is True, f"Settings tab bar clipped: {cli_modal_metrics}"
+
             eng_status = dpage.evaluate(
                 """async () => {
                     const r = await fetch('/api/engine/status', { credentials: 'include' });
                     return await r.json();
                 }"""
             )
-            print(f"[AUDIT Engine-v4.0-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.0.0", f"Expected v4.0.0, got {eng_status}"
+            print(f"[AUDIT Engine-v4.1-EXE] {eng_status}", flush=True)
+            assert eng_status.get("version") == "4.1.0", f"Expected v4.1.0, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_ai_engine.png"))
 
-            dpage.click('div.fixed.inset-0.z-50 button:has-text("업데이트")')
+            dpage.click('div[data-modal="settings"] button:has-text("보안 · PIN")')
+            dpage.wait_for_selector("text=최근 사용 기록", timeout=6000)
+            dpage.wait_for_timeout(200)
+            sec_txt = dpage.locator('div[data-modal="settings"]').inner_text()
+            assert "doc_library_updated" not in sec_txt, "Raw English event code should be translated to Korean!"
+
+            dpage.click('div[data-modal="settings"] button:has-text("업데이트")')
             dpage.wait_for_selector("text=지금 업데이트 확인", timeout=6000)
             dpage.wait_for_timeout(250)
             audit_geometry(dpage, "Desktop-1440x900-UpdatesTab")
@@ -393,8 +470,10 @@ def main() -> None:
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
             dpage.wait_for_timeout(200)
 
-            # Open Form Autofill Studio + register personal profile + verify live A4 preview!
-            dpage.locator('aside[data-panel="inspector"] button:has-text("작성 · 미리보기")').first.click()
+            # Open Form Autofill Studio via the new click-to-reveal frosted 5-action overlay!
+            dpage.locator('aside[data-panel="inspector"] div[data-form-card] div[role="button"]').first.click()
+            dpage.wait_for_selector('aside[data-panel="inspector"] div[data-form-overlay]', timeout=5000)
+            dpage.locator('aside[data-panel="inspector"] div[data-form-overlay] button:has-text("작성·미리보기")').click()
             dpage.wait_for_selector("text=실시간 A4 미리보기", timeout=8000)
             dpage.click('button:has-text("등록")')
             dpage.fill('input[placeholder*="홍길동"]', "이행정")

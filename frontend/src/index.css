@@ -63,18 +63,62 @@
 
 /* Quiet minimal scrollbars */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(24, 24, 27, 0.14);
+  background: rgba(24, 24, 27, 0.16);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(24, 24, 27, 0.28);
+  background: rgba(24, 24, 27, 0.30);
+}
+
+/* Always-consistent visible right scrollbar for Settings Modal */
+.settings-scroll {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(24, 24, 27, 0.22) transparent;
+}
+.settings-scroll::-webkit-scrollbar {
+  width: 7px;
+}
+.settings-scroll::-webkit-scrollbar-track {
+  background: rgba(24, 24, 27, 0.03);
+}
+.settings-scroll::-webkit-scrollbar-thumb {
+  background: rgba(24, 24, 27, 0.2);
+  border-radius: 9999px;
+}
+.settings-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(24, 24, 27, 0.35);
+}
+
+/* Frosted translucent action overlay for FormsVault clicked cards */
+.form-glass-overlay {
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(15, 76, 129, 0.22);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
+}
+
+html.dark .settings-scroll {
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+html.dark .settings-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+}
+html.dark .settings-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+}
+html.dark .form-glass-overlay {
+  background: rgba(24, 24, 30, 0.88) !important;
+  border-color: rgba(96, 165, 250, 0.35) !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45) !important;
 }
 
 /* ==========================================================================
@@ -104,6 +148,7 @@ html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-white\/90 {
 
 html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f7f7f5\],
 html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#fafaf9\],
+html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#fcfcfb\],
 html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#fbfbfd\],
 html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f8f8f7\],
 html.dark :not([data-paper="a4"]):not([data-paper="a4"] *).bg-\[\#f5f5f7\],

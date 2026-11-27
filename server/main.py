@@ -32,7 +32,13 @@ from core.config import (
 )
 from core.answer_cache import TwoLayerAnswerCache
 from core.database import Database
-from core.forms import export_editable_docx, export_original_pdf, export_table_xlsx, render_pdf_page_png
+from core.forms import (
+    export_editable_docx,
+    export_editable_hwpx,
+    export_original_pdf,
+    export_table_xlsx,
+    render_pdf_page_png,
+)
 from core.ingest import SUPPORTED_EXTENSIONS, ingest_file, reindex_notebook_v4, replace_document_file
 from core.korean_nlp import is_kiwi_available
 from core.neural_engine import neural_engine
@@ -820,11 +826,14 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         elif fmt_low == "docx":
             out = export_editable_docx(form)
             media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif fmt_low == "hwpx":
+            out = export_editable_hwpx(form)
+            media = "application/hwp+zip"
         elif fmt_low == "xlsx":
             out = export_table_xlsx(form)
             media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         else:
-            raise HTTPException(status_code=400, detail="지원 형식: pdf, docx, xlsx")
+            raise HTTPException(status_code=400, detail="지원 형식: pdf, docx, hwpx, xlsx")
         encoded = quote(out.name)
         return FileResponse(
             path=str(out),

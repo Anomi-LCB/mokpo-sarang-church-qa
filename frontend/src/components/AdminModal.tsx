@@ -63,6 +63,42 @@ import { MarkdownView } from './MarkdownView';
 
 export type AdminTab = 'connect' | 'profile' | 'cli' | 'updates' | 'security' | 'notebooks' | 'feedback';
 
+const AUDIT_EVENT_LABELS: Record<string, string> = {
+  doc_library_updated: '문서 고정 변경',
+  doc_upload: '문서 추가',
+  doc_updated: '문서 정보 수정',
+  doc_replaced: '문서 파일 교체',
+  doc_deleted: '문서 삭제',
+  settings_updated: '설정 변경',
+  query_ai: 'AI 답변',
+  query_instant: '즉시 원문 검색',
+  query_cache_hit: '빠른 캐시 응답',
+  query_blocked: '근거 없음 안내',
+  pin_updated: 'PIN 암호 변경',
+  sessions_revoked: '전체 기기 로그아웃',
+  backup_created: '백업 생성',
+  backup_restored: '백업 복원',
+  engine_reindex_v4: '문서 다시 색인',
+  neural_pack_install: '고급 검색 설치',
+  neural_pack_removed: '고급 검색 제거',
+  engine_cache_cleared: '캐시 비우기',
+  feedback_submitted: '제보 접수',
+  creator_settings: '제보함 설정 변경',
+  update_settings: '업데이트 설정',
+  update_download: '업데이트 다운로드',
+  update_upload_patch: '오프라인 패치 검증',
+  update_apply: '업데이트 적용',
+  notebook_created: '노트북 생성',
+  notebook_updated: '노트북 수정',
+  notebook_deleted: '노트북 삭제',
+  login_ok: '로그인',
+  login_fail: '로그인 실패',
+};
+
+function formatAuditEventLabel(code: string): string {
+  return AUDIT_EVENT_LABELS[code] || code.replace(/_/g, ' ');
+}
+
 interface Props {
   isAdmin: boolean;
   initialTab?: AdminTab;
@@ -496,14 +532,14 @@ export const AdminModal: React.FC<Props> = ({
 
   const handleReindexV4 = async () => {
     if (!activeNotebook) return;
-    if (!window.confirm('현재 노트북의 전체 문서를 엔진 v4.0(Kiwi 형태소·계층 청크·교차참조 그래프·구조화 표)으로 정밀 재색인할까요? (기존 대화·서식·설정은 100% 보존됩니다)')) return;
+    if (!window.confirm('현재 노트북의 전체 문서를 최신 검색 방식으로 다시 정리할까요? (기존 대화·서식·설정은 그대로 유지됩니다)')) return;
     setBusyAction(true);
     setMsg('');
     try {
       const res = await api.reindexEngineV4(activeNotebook.id);
-      setReindexJob({ id: res.job_id, progress: 5, message: 'v4.0 정밀 재색인 시작...', status: 'running' });
+      setReindexJob({ id: res.job_id, progress: 5, message: '문서 검색 색인을 다시 정리하는 중...', status: 'running' });
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : '재색인 시작 실패');
+      setMsg(err instanceof Error ? err.message : '문서 재정리 시작 실패');
     } finally {
       setBusyAction(false);
     }
@@ -511,15 +547,15 @@ export const AdminModal: React.FC<Props> = ({
 
   const handleInstallNeuralPack = async () => {
     const nbId = activeNotebook?.id || 'mokpo-sarang-church';
-    if (!window.confirm('로컬 CPU ONNX 신경망 팩(다국어 임베딩 + Cross-Encoder 리랭커, 약 380MB)을 data/models/ 폴더에 다운로드하고 벡터 색인을 구축할까요? 설치 후에는 100% 오프라인으로 동작합니다.')) return;
+    if (!window.confirm('고급 의미 검색 기능(약 380MB, 무료)을 이 PC에 설치할까요? 한 번 설치해 두면 인터넷이 없어도 동작합니다.')) return;
     setBusyAction(true);
     setMsg('');
     try {
       const res = await api.installNeuralPack(nbId, true);
       setEngineStatus((prev) => (prev ? { ...prev, neural: res.neural } : prev));
-      setMsg('로컬 신경망 팩 다운로드 및 벡터 색인 구축을 시작했습니다.');
+      setMsg('고급 의미 검색 기능을 내려받고 있습니다. 완료될 때까지 잠시만 기다려 주세요.');
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : '신경망 팩 설치 시작 실패');
+      setMsg(err instanceof Error ? err.message : '고급 검색 설치 시작 실패');
     } finally {
       setBusyAction(false);
     }
@@ -527,15 +563,15 @@ export const AdminModal: React.FC<Props> = ({
 
   const handleRemoveNeuralPack = async () => {
     const nbId = activeNotebook?.id || 'mokpo-sarang-church';
-    if (!window.confirm('설치된 로컬 ONNX 신경망 팩과 벡터 색인을 제거할까요? (기본 Kiwi + 교차참조 v4.0 검색은 그대로 유지됩니다)')) return;
+    if (!window.confirm('설치된 고급 의미 검색 기능을 삭제할까요? 기본 한글 정밀 검색은 그대로 유지됩니다.')) return;
     setBusyAction(true);
     setMsg('');
     try {
       const res = await api.removeNeuralPack(nbId);
       setEngineStatus((prev) => (prev ? { ...prev, neural: res.neural } : prev));
-      setMsg('로컬 신경망 팩이 제거되었습니다.');
+      setMsg('고급 의미 검색 기능이 삭제되었습니다.');
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : '신경망 팩 제거 실패');
+      setMsg(err instanceof Error ? err.message : '고급 검색 삭제 실패');
     } finally {
       setBusyAction(false);
     }
@@ -547,9 +583,9 @@ export const AdminModal: React.FC<Props> = ({
     try {
       const res = await api.clearEngineCache();
       setEngineStatus((prev) => (prev ? { ...prev, cache: res.cache } : prev));
-      setMsg('답변 즉시 캐시와 벡터 메모리 캐시가 초기화되었습니다.');
+      setMsg('임시 저장된 빠른 답변 캐시를 비웠습니다.');
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : '캐시 초기화 실패');
+      setMsg(err instanceof Error ? err.message : '캐시 비우기 실패');
     } finally {
       setBusyAction(false);
     }
@@ -764,59 +800,71 @@ export const AdminModal: React.FC<Props> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-3 backdrop-blur-xs sm:p-6">
-      <div className="flex max-h-[92dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl">
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fbfbfd] px-4 py-3">
-          <h3 className="text-sm font-semibold text-[#1d1d1f]">환경 설정 · 모바일 연결 · 보안 관리</h3>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-3 backdrop-blur-xs sm:p-5">
+      <div
+        data-modal="settings"
+        className="flex h-[min(86dvh,760px)] w-full max-w-[900px] flex-col overflow-hidden rounded-2xl border border-black/[0.09] bg-white shadow-2xl"
+      >
+        {/* Fixed Non-Shrinking Modal Header */}
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-white px-5 py-3.5">
+          <div>
+            <h3 className="text-[14.5px] font-semibold tracking-tight text-[#18181b]">환경 설정</h3>
+            <p className="text-[11px] text-[#71717a]">연결 · 내 정보 · 화면 · AI · 업데이트 · 보안 관리</p>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="닫기"
-            className="rounded-lg p-1.5 text-[#6e6e73] hover:bg-black/[0.06]"
+            title="설정 창 닫기"
+            className="rounded-lg p-1.5 text-[#71717a] transition hover:bg-black/[0.06] hover:text-[#18181b]"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="flex gap-1 overflow-x-auto border-b border-black/[0.07] bg-[#f7f7f5] px-3 pt-2">
+        {/* Fixed Non-Shrinking Tab Bar (Zero vertical clipping!) */}
+        <div
+          data-role="settings-tabs"
+          className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-black/[0.08] bg-[#f7f7f5] px-4 pt-1.5"
+        >
           <button
             type="button"
             onClick={() => setTab('connect')}
-            className={`chip-nowrap inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold ${
-              tab === 'connect' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a]'
+            className={`chip-nowrap inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-semibold transition ${
+              tab === 'connect' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a] hover:text-[#18181b]'
             }`}
           >
-            <QrCode className="h-3.5 w-3.5" />
+            <QrCode className="h-3.5 w-3.5 shrink-0" />
             <span>연결 · APK</span>
           </button>
           <button
             type="button"
             onClick={() => setTab('profile')}
-            className={`chip-nowrap inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold ${
-              tab === 'profile' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a]'
+            className={`chip-nowrap inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-semibold transition ${
+              tab === 'profile' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a] hover:text-[#18181b]'
             }`}
           >
-            <UserCheck className="h-3.5 w-3.5" />
+            <UserCheck className="h-3.5 w-3.5 shrink-0" />
             <span>내 기본 정보</span>
           </button>
           <button
             type="button"
             onClick={() => setTab('cli')}
-            className={`chip-nowrap inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold ${
-              tab === 'cli' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a]'
+            className={`chip-nowrap inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-semibold transition ${
+              tab === 'cli' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a] hover:text-[#18181b]'
             }`}
           >
-            <Terminal className="h-3.5 w-3.5" />
+            <Terminal className="h-3.5 w-3.5 shrink-0" />
             <span>화면 · AI 엔진</span>
           </button>
           <button
             type="button"
             onClick={() => setTab('updates')}
-            className={`chip-nowrap inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold ${
-              tab === 'updates' ? 'border-[#0f4c81] text-[#0f4c81]' : 'border-transparent text-[#71717a]'
+            className={`chip-nowrap inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-semibold transition ${
+              tab === 'updates' ? 'border-[#0f4c81] text-[#0f4c81]' : 'border-transparent text-[#71717a] hover:text-[#18181b]'
             }`}
           >
-            <ArrowUpCircle className="h-3.5 w-3.5" />
+            <ArrowUpCircle className="h-3.5 w-3.5 shrink-0" />
             <span>업데이트</span>
             {updateInfo?.update_available && (
               <span className="h-1.5 w-1.5 rounded-full bg-[#0f4c81]" aria-hidden="true" />
@@ -827,40 +875,41 @@ export const AdminModal: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={() => setTab('security')}
-                className={`chip-nowrap inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold ${
-                  tab === 'security' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a]'
+                className={`chip-nowrap inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-semibold transition ${
+                  tab === 'security' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a] hover:text-[#18181b]'
                 }`}
               >
-                <Shield className="h-3.5 w-3.5" />
+                <Shield className="h-3.5 w-3.5 shrink-0" />
                 <span>보안 · PIN</span>
               </button>
               <button
                 type="button"
                 onClick={() => setTab('notebooks')}
-                className={`chip-nowrap inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold ${
-                  tab === 'notebooks' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a]'
+                className={`chip-nowrap inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-semibold transition ${
+                  tab === 'notebooks' ? 'border-[#18181b] text-[#18181b]' : 'border-transparent text-[#71717a] hover:text-[#18181b]'
                 }`}
               >
-                <Database className="h-3.5 w-3.5" />
+                <Database className="h-3.5 w-3.5 shrink-0" />
                 <span>노트북 · 백업</span>
               </button>
               <button
                 type="button"
                 onClick={() => setTab('feedback')}
-                className={`chip-nowrap inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold ${
-                  tab === 'feedback' ? 'border-[#0f4c81] text-[#0f4c81]' : 'border-transparent text-[#71717a]'
+                className={`chip-nowrap inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[12px] font-semibold transition ${
+                  tab === 'feedback' ? 'border-[#0f4c81] text-[#0f4c81]' : 'border-transparent text-[#71717a] hover:text-[#18181b]'
                 }`}
               >
-                <Inbox className="h-3.5 w-3.5" />
+                <Inbox className="h-3.5 w-3.5 shrink-0" />
                 <span>제작자 제보함</span>
               </button>
             </>
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+        {/* Fixed-Height Scrollable Body with Persistent Right Scrollbar */}
+        <div className="settings-scroll min-h-0 flex-1 overflow-y-scroll bg-[#fcfcfb] px-5 py-4 sm:px-6 sm:py-5">
           {msg && (
-            <div className="mb-3 rounded-xl border border-[#007AFF]/25 bg-[#007AFF]/[0.07] px-3 py-2 text-xs font-medium text-[#1d1d1f]">
+            <div className="mb-4 rounded-xl border border-[#0f4c81]/20 bg-[#0f4c81]/[0.06] px-3.5 py-2.5 text-xs font-medium text-[#18181b]">
               {msg}
             </div>
           )}
@@ -1468,7 +1517,7 @@ export const AdminModal: React.FC<Props> = ({
           ) : tab === 'cli' && cli ? (
             <div className="space-y-4">
               {/* Display Layout & Theme Options (Available for all users) */}
-              <div className="space-y-3 rounded-xl border border-black/[0.08] p-4">
+              <div className="space-y-3 rounded-xl border border-black/[0.08] bg-white p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/[0.06] pb-3">
                   <div>
                     <p className="text-xs font-semibold text-[#18181b]">화면 테마 (라이트 · 다크 모드)</p>
@@ -1530,50 +1579,49 @@ export const AdminModal: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Engine v4.0 Core Retrieval + Optional Local ONNX Neural Pack */}
+              {/* Smart Search Engine & Optional Meaning Search Add-on (Plain Korean UX) */}
               {engineStatus && (
-                <div className="space-y-3 rounded-xl border border-black/[0.08] p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <p className="text-xs font-semibold text-[#18181b]">
-                          내부 검색 엔진 v{engineStatus.version}
-                        </p>
-                        <span
-                          className={`chip-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                            engineStatus.kiwi_active
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-zinc-200 text-zinc-600'
-                          }`}
-                        >
-                          {engineStatus.kiwi_active ? 'Kiwi 한국어 형태소 활성' : '기본 토크나이저'}
+                <div className="space-y-3 rounded-xl border border-black/[0.08] bg-white p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-xs font-semibold text-[#18181b]">스마트 검색 엔진</p>
+                      <span
+                        className={`chip-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                          engineStatus.kiwi_active
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-zinc-200 text-zinc-600'
+                        }`}
+                      >
+                        {engineStatus.kiwi_active ? '한글 정밀 분석 켜짐' : '기본 검색'}
+                      </span>
+                      {engineStatus.neural.active && (
+                        <span className="chip-nowrap rounded-full bg-[#0f4c81]/10 px-2 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                          고급 의미 검색 켜짐
                         </span>
-                        {engineStatus.neural.active && (
-                          <span className="chip-nowrap rounded-full bg-[#0f4c81]/10 px-2 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
-                            ONNX 로컬 신경망 활성
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-0.5 text-[11px] text-[#71717a]">
-                        계층 청크 {engineStatus.stats.chunks.toLocaleString()}개 · 조문 교차참조 {engineStatus.stats.cross_refs.toLocaleString()}건 · 구조화 표 {engineStatus.stats.structured_tables}개 · 답변 캐시 {engineStatus.cache.entries}건 (적중 {engineStatus.cache.hits}회)
-                      </p>
+                      )}
                     </div>
+                    <span className="chip-nowrap text-[11px] font-medium text-[#8a8a8e]">v{engineStatus.version}</span>
                   </div>
 
-                  {/* Optional 1-Click Local CPU ONNX Neural Pack */}
-                  <div className="rounded-lg border border-black/[0.07] bg-[#fafaf9] p-3 space-y-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] text-[#71717a]">
+                    문서 {engineStatus.stats.documents}권 · 조항 {engineStatus.stats.chunks.toLocaleString()}개 · 연결 조문 {engineStatus.stats.cross_refs.toLocaleString()}건 · 표 {engineStatus.stats.structured_tables}개
+                    {engineStatus.cache.hits > 0 ? ` · 빠른 응답 ${engineStatus.cache.hits}회` : ''}
+                  </p>
+
+                  {/* Optional Meaning Search Pack in plain everyday language */}
+                  <div className="space-y-2.5 rounded-lg border border-black/[0.07] bg-[#fafaf9] p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
-                        <p className="text-[11.5px] font-semibold text-[#18181b]">
-                          로컬 신경망 고정밀 팩 (ONNX INT8 · 선택 설치)
+                        <p className="text-[12px] font-semibold text-[#18181b]">
+                          고급 의미 검색 추가 <span className="font-normal text-[#71717a]">(무료 · 선택)</span>
                         </p>
-                        <p className="text-[10.5px] leading-snug text-[#71717a]">
-                          다국어 임베딩(multilingual-e5-small) + Cross-Encoder 리랭커(jina-reranker-v2)를 PC 내부에 설치하면, 일상적 표현 질문과 유사 질문 즉시 캐시 정확도가 더욱 높아집니다. (무료 · 100% 오프라인 동작)
+                        <p className="mt-0.5 text-[11px] leading-relaxed text-[#71717a]">
+                          설치해 두면 일상적인 말로 물어봐도 문서 뜻을 더 잘 찾아주며, 인터넷이 없어도 동작합니다.
                         </p>
                       </div>
                       {engineStatus.neural.embed_installed ? (
                         <span className="chip-nowrap rounded-md bg-emerald-100 px-2 py-1 text-[10.5px] font-semibold text-emerald-800">
-                          설치됨 · 벡터 {engineStatus.neural.embedded_chunks}/{engineStatus.neural.total_chunks} ({engineStatus.neural.disk_mb}MB)
+                          설치됨 ({engineStatus.neural.disk_mb}MB)
                         </span>
                       ) : (
                         <span className="chip-nowrap rounded-md bg-white px-2 py-1 text-[10.5px] font-medium text-[#71717a] ring-1 ring-black/[0.08]">
@@ -1584,7 +1632,7 @@ export const AdminModal: React.FC<Props> = ({
 
                     {(engineStatus.neural.install_state.status === 'downloading' ||
                       engineStatus.neural.install_state.status === 'indexing') && (
-                      <div className="space-y-1 pt-1">
+                      <div className="space-y-1 pt-0.5">
                         <div className="flex items-center justify-between text-[11px] font-medium text-[#0f4c81]">
                           <span className="truncate">{engineStatus.neural.install_state.message}</span>
                           <span className="tabular-nums">{engineStatus.neural.install_state.progress}%</span>
@@ -1599,7 +1647,7 @@ export const AdminModal: React.FC<Props> = ({
                     )}
 
                     {reindexJob && reindexJob.status === 'running' && (
-                      <div className="space-y-1 pt-1">
+                      <div className="space-y-1 pt-0.5">
                         <div className="flex items-center justify-between text-[11px] font-medium text-[#0f4c81]">
                           <span className="truncate">{reindexJob.message}</span>
                           <span className="tabular-nums">{reindexJob.progress}%</span>
@@ -1614,7 +1662,7 @@ export const AdminModal: React.FC<Props> = ({
                     )}
 
                     {isAdmin && (
-                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <div className="flex flex-wrap items-center gap-2 pt-0.5">
                         {!engineStatus.neural.embed_installed ? (
                           <button
                             type="button"
@@ -1624,10 +1672,10 @@ export const AdminModal: React.FC<Props> = ({
                               engineStatus.neural.install_state.status === 'indexing'
                             }
                             onClick={() => void handleInstallNeuralPack()}
-                            className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3 py-1.5 text-[11.5px] font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-50"
+                            className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3 py-1.5 text-[11.5px] font-semibold text-white transition hover:bg-[#0c3d68] disabled:opacity-50"
                           >
                             <Download className="h-3.5 w-3.5" />
-                            <span>로컬 신경망 팩 1클릭 설치</span>
+                            <span>고급 검색 설치</span>
                           </button>
                         ) : (
                           <button
@@ -1637,7 +1685,7 @@ export const AdminModal: React.FC<Props> = ({
                             className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-[11.5px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
-                            <span>신경망 팩 제거</span>
+                            <span>고급 검색 삭제</span>
                           </button>
                         )}
                         <button
@@ -1647,7 +1695,7 @@ export const AdminModal: React.FC<Props> = ({
                           className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.12] bg-white px-2.5 py-1.5 text-[11.5px] font-semibold text-[#18181b] hover:bg-[#f7f7f5] disabled:opacity-50"
                         >
                           <RefreshCw className={`h-3.5 w-3.5 ${reindexJob?.status === 'running' ? 'animate-spin' : ''}`} />
-                          <span>전체 자료 v4.0 정밀 재색인</span>
+                          <span>문서 다시 색인</span>
                         </button>
                         <button
                           type="button"
@@ -1656,7 +1704,7 @@ export const AdminModal: React.FC<Props> = ({
                           className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-[#52525b] hover:bg-[#f7f7f5] disabled:opacity-50"
                         >
                           <RotateCcw className="h-3.5 w-3.5" />
-                          <span>답변 캐시 초기화</span>
+                          <span>캐시 비우기</span>
                         </button>
                       </div>
                     )}
@@ -1665,7 +1713,7 @@ export const AdminModal: React.FC<Props> = ({
               )}
 
               {/* Connection Mode Switcher: Auto | CLI | API */}
-              <div className="space-y-2.5 rounded-xl border border-black/[0.08] p-4">
+              <div className="space-y-2.5 rounded-xl border border-black/[0.08] bg-white p-4">
                 <div>
                   <p className="text-xs font-semibold text-[#18181b]">AI 연결 방식 선택 (선택 사항)</p>
                   <p className="text-[11px] text-[#71717a]">
@@ -1716,7 +1764,7 @@ export const AdminModal: React.FC<Props> = ({
 
               {/* CLI Provider Section (shown for cli or auto) */}
               {(connectionMode === 'cli' || connectionMode === 'auto') && (
-                <div className="space-y-2.5 rounded-xl border border-black/[0.08] p-4">
+                <div className="space-y-2.5 rounded-xl border border-black/[0.08] bg-white p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs font-semibold text-[#18181b]">구독 CLI 엔진 선택</p>
                     {isAdmin && (
@@ -1778,7 +1826,7 @@ export const AdminModal: React.FC<Props> = ({
 
               {/* Direct API Provider Section (shown for api or auto) */}
               {(connectionMode === 'api' || connectionMode === 'auto') && (
-                <div className="space-y-3 rounded-xl border border-black/[0.08] p-4">
+                <div className="space-y-3 rounded-xl border border-black/[0.08] bg-white p-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <p className="text-xs font-semibold text-[#18181b]">API 키 직접 연결 설정</p>
@@ -1949,11 +1997,11 @@ export const AdminModal: React.FC<Props> = ({
               )}
 
               {isAdmin && (
-                <div className="space-y-3 rounded-xl border border-black/[0.08] p-4">
+                <div className="space-y-3 rounded-xl border border-black/[0.08] bg-white p-4">
                   <label className="flex cursor-pointer items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs font-semibold text-[#18181b]">자동 장애 전환 (Failover)</p>
-                      <p className="text-[11px] text-[#71717a]">주 엔진이 일시 한도·오류 발생 시 보조 CLI/API로 자동 전환</p>
+                      <p className="text-xs font-semibold text-[#18181b]">AI 자동 백업 전환</p>
+                      <p className="text-[11px] text-[#71717a]">사용 중인 AI가 한도에 걸리거나 오류가 나면 보조 AI로 자동 전환</p>
                     </div>
                     <input
                       type="checkbox"
@@ -2364,35 +2412,37 @@ export const AdminModal: React.FC<Props> = ({
                 </button>
               </div>
 
-              {/* Recent Audit Logs */}
-              <div className="space-y-2 rounded-xl border border-black/[0.08] p-4">
+              {/* Recent Audit Logs (Human-Readable Korean Event Labels) */}
+              <div className="space-y-2.5 rounded-xl border border-black/[0.08] bg-white p-4">
                 <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-semibold text-[#1d1d1f]">최근 보안 감사 로그 ({auditLogs.length}건)</h4>
+                  <h4 className="text-xs font-semibold text-[#18181b]">최근 사용 기록 ({auditLogs.length}건)</h4>
                   {auditLogs.length > 0 && (
                     <button
                       type="button"
                       onClick={() => void api.clearAuditLogs().then(() => setAuditLogs([]))}
-                      className="chip-nowrap text-[11px] text-[#86868b] hover:text-red-600"
+                      className="chip-nowrap text-[11px] font-medium text-[#71717a] hover:text-red-600"
                     >
-                      로그 비우기
+                      기록 비우기
                     </button>
                   )}
                 </div>
-                <div className="max-h-44 overflow-y-auto rounded-lg border border-black/[0.06] bg-[#fbfbfd]">
+                <div className="max-h-48 overflow-y-auto rounded-lg border border-black/[0.06] bg-[#fafaf9]">
                   {auditLogs.length === 0 ? (
-                    <p className="p-3 text-center text-[11px] text-[#86868b]">기록된 감사 이벤트가 없습니다.</p>
+                    <p className="p-3 text-center text-[11px] text-[#8a8a8e]">기록된 활동 내역이 없습니다.</p>
                   ) : (
                     auditLogs.map((lg) => (
                       <div
                         key={lg.id}
-                        className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.05] px-3 py-1.5 text-[11px] last:border-b-0"
+                        className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.05] px-3 py-2 text-[11px] last:border-b-0"
                       >
-                        <div className="min-w-0 flex-1">
-                          <span className="font-semibold text-[#1d1d1f]">[{lg.event_type}]</span>{' '}
-                          <span className="text-[#424245]">{lg.detail}</span>
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+                          <span className="chip-nowrap rounded bg-[#0f4c81]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                            {formatAuditEventLabel(lg.event_type)}
+                          </span>
+                          <span className="truncate text-[#3f3f46]">{lg.detail}</span>
                         </div>
-                        <span className="chip-nowrap text-[10px] text-[#86868b]">
-                          {lg.actor_label} · {lg.client_ip} · {lg.created_at.slice(5, 16).replace('T', ' ')}
+                        <span className="chip-nowrap text-[10px] text-[#8a8a8e]">
+                          {lg.actor_label} · {lg.created_at.slice(5, 16).replace('T', ' ')}
                         </span>
                       </div>
                     ))

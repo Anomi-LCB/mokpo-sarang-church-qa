@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import zipfile
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 import docx
 from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -568,4 +570,252 @@ def export_editable_docx(
                     _set_korean_font(p.add_run(ln), size_pt=9.5, color_rgb=(51, 65, 85))
 
     document.save(str(out_path))
+    return out_path
+
+
+def _hwpx_para(text: str, para_pr_id: int = 0, char_pr_id: int = 0) -> str:
+    safe = xml_escape(text or "")
+    return (
+        f'<hp:p id="0" paraPrIDRef="{para_pr_id}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        f'<hp:run charPrIDRef="{char_pr_id}"><hp:t>{safe}</hp:t></hp:run>'
+        f"</hp:p>"
+    )
+
+
+def _hwpx_table(rows: list[list[str]], header_row: bool = True) -> str:
+    if not rows:
+        return ""
+    col_cnt = max(len(r) for r in rows)
+    row_cnt = len(rows)
+    total_w = 42520  # ~150mm in HWPUNIT (1mm ≈ 283.465)
+    col_w = max(3000, total_w // max(1, col_cnt))
+    tr_xml: list[str] = []
+    for r_idx, row in enumerate(rows):
+        is_hdr = header_row and r_idx == 0
+        bf_id = 4 if is_hdr else 3
+        cpr_id = 3 if is_hdr else 2
+        cells_xml: list[str] = []
+        for c_idx in range(col_cnt):
+            val = row[c_idx] if c_idx < len(row) else ""
+            safe = xml_escape(val)
+            cells_xml.append(
+                f'<hp:tc name="" header="{1 if is_hdr else 0}" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="{bf_id}">'
+                f'<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">'
+                f'<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+                f'<hp:run charPrIDRef="{cpr_id}"><hp:t>{safe}</hp:t></hp:run>'
+                f"</hp:p></hp:subList>"
+                f'<hp:cellAddr colAddr="{c_idx}" rowAddr="{r_idx}"/>'
+                f'<hp:cellSpan colSpan="1" rowSpan="1"/>'
+                f'<hp:cellSz width="{col_w}" height="2400"/>'
+                f'<hp:cellMargin left="283" right="283" top="142" bottom="142"/>'
+                f"</hp:tc>"
+            )
+        tr_xml.append("<hp:tr>" + "".join(cells_xml) + "</hp:tr>")
+
+    tbl_xml = (
+        f'<hp:tbl id="100" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" '
+        f'lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="{row_cnt}" colCnt="{col_cnt}" '
+        f'cellSpacing="0" borderFillIDRef="3" noAdjust="0">'
+        f'<hp:sz width="{col_w * col_cnt}" widthRelTo="ABSOLUTE" height="{row_cnt * 2400}" heightRelTo="ABSOLUTE" protect="0"/>'
+        f'<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" '
+        f'vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+        f'<hp:outMargin left="0" right="0" top="142" bottom="283"/>'
+        f'<hp:inMargin left="283" right="283" top="142" bottom="142"/>'
+        + "".join(tr_xml)
+        + "</hp:tbl>"
+    )
+    return (
+        '<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        f'<hp:run charPrIDRef="2">{tbl_xml}</hp:run></hp:p>'
+    )
+
+
+def export_editable_hwpx(
+    form: dict[str, Any],
+    filled_data: dict[str, Any] | None = None,
+    out_path: Path | None = None,
+) -> Path:
+    """Create a standards-compliant KS X 6101 Hancom Hangul (.hwpx / OWPML) editable form document."""
+    out_dir = get_exports_dir() / ("autofill" if filled_data else "forms")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if out_path is None:
+        safe = re.sub(r'[\\/:*?"<>|]+', "_", form["title"])[:45]
+        suffix = "_작성본" if filled_data else ""
+        uid = (
+            hashlib.sha1(json.dumps(filled_data or {}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:6]
+            if filled_data
+            else ""
+        )
+        tag = f"_{uid}" if uid else ""
+        out_path = out_dir / f"{form['id']}_{safe}{suffix}{tag}.hwpx"
+
+    doc_title = (
+        filled_data.get("document_title")
+        if filled_data and filled_data.get("document_title")
+        else form["title"]
+    )
+    source_line = f"근거 출처: {form.get('doc_title', '')} (p.{form['page_start']})"
+
+    # First paragraph holds section properties (A4 portrait) + centered bold title
+    sec_pr_xml = (
+        '<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" '
+        'outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">'
+        '<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>'
+        '<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>'
+        '<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>'
+        '<hp:pagePr landscape="WIDELY" width="59528" height="84188" gutterType="LEFT_ONLY">'
+        '<hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5668" bottom="4252"/>'
+        "</hp:pagePr>"
+        "</hp:secPr>"
+    )
+    body_blocks: list[str] = [
+        '<hp:p id="0" paraPrIDRef="1" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        f'<hp:run charPrIDRef="0">{sec_pr_xml}<hp:t>{xml_escape(doc_title)}</hp:t></hp:run></hp:p>',
+        _hwpx_para(source_line, para_pr_id=2, char_pr_id=1),
+        _hwpx_para("", para_pr_id=0, char_pr_id=2),
+    ]
+
+    if filled_data:
+        fields_list: list[dict[str, str]] = filled_data.get("fields", [])
+        if fields_list:
+            rows = [["항목", "내용"]] + [
+                [str(item.get("label", "")), str(item.get("value", "")).strip() or "____________________"]
+                for item in fields_list
+            ]
+            body_blocks.append(_hwpx_table(rows, header_row=True))
+        for para_text in filled_data.get("body_paragraphs", []):
+            body_blocks.append(_hwpx_para(str(para_text), para_pr_id=0, char_pr_id=2))
+        body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+        body_blocks.append(_hwpx_para(filled_data.get("date_line") or "20    년      월      일", para_pr_id=1, char_pr_id=2))
+        body_blocks.append(
+            _hwpx_para(filled_data.get("signer_line") or "신청인(제출자):                    (인)", para_pr_id=2, char_pr_id=2)
+        )
+        if filled_data.get("recipient_line"):
+            body_blocks.append(_hwpx_para(str(filled_data["recipient_line"]), para_pr_id=0, char_pr_id=0))
+    else:
+        pdf_path = Path(form.get("doc_path", ""))
+        tables = _extract_pdf_tables_data(pdf_path, form["page_start"], form["page_end"])
+        if tables:
+            for rows in tables:
+                body_blocks.append(_hwpx_table(rows, header_row=True))
+                body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+        elif form.get("fields"):
+            rows = [["항목", "기입 내용"]] + [[str(f_label), ""] for f_label in form["fields"]]
+            body_blocks.append(_hwpx_table(rows, header_row=True))
+            body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+
+        sample_text = (form.get("sample_text") or "").strip()
+        if sample_text:
+            body_blocks.append(_hwpx_para("[원본 서식 문구]", para_pr_id=0, char_pr_id=4))
+            for ln in sample_text.splitlines():
+                ln = ln.strip()
+                if ln:
+                    body_blocks.append(_hwpx_para(ln, para_pr_id=0, char_pr_id=2))
+
+    version_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" '
+        'tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="1" buildNumber="0" os="1" xmlVersion="1.4" application="Hancom Office Hangul"/>'
+    )
+    container_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" '
+        'xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf">'
+        "<ocf:rootfiles>"
+        '<ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/>'
+        "</ocf:rootfiles></ocf:container>"
+    )
+    manifest_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>'
+    )
+    content_hpf = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<opf:package xmlns:opf="http://www.idpf.org/2007/opf/" version="" unique-identifier="" id="">'
+        f"<opf:metadata><opf:title>{xml_escape(doc_title)}</opf:title><opf:language>ko</opf:language></opf:metadata>"
+        "<opf:manifest>"
+        '<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>'
+        '<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>'
+        "</opf:manifest>"
+        '<opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine>'
+        "</opf:package>"
+    )
+    header_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" '
+        'xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core" version="1.4" secCnt="1">'
+        '<hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/>'
+        "<hh:refList>"
+        '<hh:fontfaces itemCnt="1">'
+        '<hh:fontface lang="HANGUL" fontCnt="1">'
+        '<hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0"/>'
+        "</hh:fontface></hh:fontfaces>"
+        '<hh:borderFills itemCnt="4">'
+        '<hh:borderFill id="1" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:topBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:bottomBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        "</hh:borderFill>"
+        '<hh:borderFill id="2" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:topBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:bottomBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        "</hh:borderFill>"
+        '<hh:borderFill id="3" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:rightBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:topBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:bottomBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hc:fillBrush><hc:winBrush faceColor="#FFFFFF" hatchColor="#999999" alpha="0"/></hc:fillBrush>'
+        "</hh:borderFill>"
+        '<hh:borderFill id="4" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:rightBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:topBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:bottomBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hc:fillBrush><hc:winBrush faceColor="#EEF2F7" hatchColor="#999999" alpha="0"/></hc:fillBrush>'
+        "</hh:borderFill>"
+        "</hh:borderFills>"
+        '<hh:charProperties itemCnt="5">'
+        '<hh:charPr id="0" height="1600" textColor="#0F172A" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2">'
+        '<hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:bold/></hh:charPr>'
+        '<hh:charPr id="1" height="850" textColor="#64748B" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2">'
+        '<hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/></hh:charPr>'
+        '<hh:charPr id="2" height="1000" textColor="#1E293B" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2">'
+        '<hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/></hh:charPr>'
+        '<hh:charPr id="3" height="1000" textColor="#0F172A" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2">'
+        '<hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:bold/></hh:charPr>'
+        '<hh:charPr id="4" height="950" textColor="#475569" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2">'
+        '<hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:bold/></hh:charPr>'
+        "</hh:charProperties>"
+        '<hh:paraProperties itemCnt="3">'
+        '<hh:paraPr id="0" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0">'
+        '<hh:align horizontal="LEFT" vertical="BASELINE"/><hh:lineSpacing type="PERCENT" value="150" unit="HWPUNIT"/></hh:paraPr>'
+        '<hh:paraPr id="1" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0">'
+        '<hh:align horizontal="CENTER" vertical="BASELINE"/><hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/></hh:paraPr>'
+        '<hh:paraPr id="2" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0">'
+        '<hh:align horizontal="RIGHT" vertical="BASELINE"/><hh:lineSpacing type="PERCENT" value="150" unit="HWPUNIT"/></hh:paraPr>'
+        "</hh:paraProperties>"
+        "</hh:refList></hh:head>"
+    )
+    section0_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" '
+        'xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" '
+        'xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+        + "".join(body_blocks)
+        + "</hs:sec>"
+    )
+
+    with zipfile.ZipFile(str(out_path), "w") as zf:
+        zf.writestr("mimetype", "application/hwp+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("version.xml", version_xml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("META-INF/container.xml", container_xml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("META-INF/manifest.xml", manifest_xml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("Contents/content.hpf", content_hpf.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("Contents/header.xml", header_xml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+        zf.writestr("Contents/section0.xml", section0_xml.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+
     return out_path

@@ -201,9 +201,17 @@ def test_engine_status_and_cache_clear_endpoints(tmp_path):
         r_st = client.get("/api/engine/status", headers=hdrs)
         assert r_st.status_code == 200
         data = r_st.json()
-        assert data["version"] == "4.0.0"
+        assert data["version"].startswith("4.")
         assert data["kiwi_active"] is True
         assert "stats" in data and "neural" in data and "cache" in data
 
         r_clr = client.post("/api/admin/engine/cache/clear", headers=hdrs)
         assert r_clr.status_code == 200 and r_clr.json()["ok"] is True
+
+
+def test_cli_quota_limit_detection():
+    from server.cli_providers import _CLI_QUOTA_ERROR_RE
+
+    assert _CLI_QUOTA_ERROR_RE.search("You've hit your weekly limit · resets Nov 28, 7pm (Asia/Seoul)")
+    assert _CLI_QUOTA_ERROR_RE.search("Rate limit exceeded. Please try again later.")
+    assert not _CLI_QUOTA_ERROR_RE.search("목포사랑의교회 정관 제15조에 따르면 장로 후보자는 만 40세 이상입니다.")

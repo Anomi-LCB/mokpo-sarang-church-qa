@@ -411,6 +411,14 @@ def build_grounded_prompt(
 """
 
 
+_CLI_QUOTA_ERROR_RE = re.compile(
+    r"(hit your (?:weekly|daily|session|usage) limit|rate limit(?:ed| exceeded)?|"
+    r"quota exceeded|credit balance is too low|usage limit reached|"
+    r"resets\s+[A-Z][a-z]{2}\s+\d{1,2})",
+    re.I,
+)
+
+
 def _extract_claude_stream_text(event: dict[str, Any]) -> str | None:
     etype = event.get("type")
     if etype == "stream_event":
@@ -690,14 +698,16 @@ async def stream_cli_response(
 
         emitted_any = False
         final_fallback = ""
+        lead_buf = ""
 
         async def _read_lines() -> AsyncIterator[str]:
-            nonlocal emitted_any, final_fallback
+            nonlocal emitted_any, final_fallback, lead_buf
             while True:
                 raw_line = await proc.stdout.readline()
                 if not raw_line:
                     break
                 line = raw_line.decode("utf-8", errors="replace")
+                piece = ""
                 if provider_id == "claude":
                     stripped = line.strip()
                     if not stripped:
@@ -706,18 +716,36 @@ async def stream_cli_response(
                         ev = json.loads(stripped)
                         delta = _extract_claude_stream_text(ev)
                         if delta:
-                            emitted_any = True
-                            yield delta
+                            piece = delta
                         else:
                             fin = _extract_claude_final_text(ev)
                             if fin:
                                 final_fallback = fin
+                            continue
                     except json.JSONDecodeError:
-                        emitted_any = True
-                        yield line
+                        piece = line
                 else:
-                    emitted_any = True
-                    yield line
+                    piece = line
+
+                if not emitted_any:
+                    lead_buf += piece
+                    if _CLI_QUOTA_ERROR_RE.search(lead_buf):
+                        raise RuntimeError(f"{info.name} 사용 한도 도달: {lead_buf.strip()[:160]}")
+                    # Flush immediately unless leading text looks like an English error notice still streaming
+                    if len(lead_buf) >= 24 or any("\uac00" <= ch <= "\ud7a3" for ch in lead_buf) or "\n" in lead_buf:
+                        emitted_any = True
+                        out_txt = lead_buf
+                        lead_buf = ""
+                        yield out_txt
+                else:
+                    yield piece
+
+            if lead_buf and not emitted_any:
+                if _CLI_QUOTA_ERROR_RE.search(lead_buf):
+                    raise RuntimeError(f"{info.name} 사용 한도 도달: {lead_buf.strip()[:160]}")
+                emitted_any = True
+                yield lead_buf
+                lead_buf = ""
 
         async with asyncio.timeout(timeout_sec):
             async for chunk in _read_lines():
@@ -725,6 +753,8 @@ async def stream_cli_response(
             rc = await proc.wait()
 
         if not emitted_any and final_fallback:
+            if _CLI_QUOTA_ERROR_RE.search(final_fallback):
+                raise RuntimeError(f"{info.name} 사용 한도 도달: {final_fallback.strip()[:160]}")
             yield final_fallback
             emitted_any = True
 

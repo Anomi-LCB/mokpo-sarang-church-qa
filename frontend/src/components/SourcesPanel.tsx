@@ -1,7 +1,9 @@
 import React, { memo, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Eye,
   FileSpreadsheet,
   FileText,
@@ -105,6 +107,25 @@ export const SourcesPanel: React.FC<Props> = memo(({
   const [shareMenuSessionId, setShareMenuSessionId] = useState<string | null>(null);
   const [updateTarget, setUpdateTarget] = useState<DocumentItem | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DocumentItem | null>(null);
+  const [sourcesCollapsed, setSourcesCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('church_search_sources_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleSourcesCollapsed = () => {
+    setSourcesCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('church_search_sources_collapsed', next ? '1' : '0');
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
 
   const shelfDocs = useMemo(() => [...pinnedDocs, ...loadedDocs], [pinnedDocs, loadedDocs]);
   const shelfIds = useMemo(() => new Set(shelfDocs.map((d) => d.id)), [shelfDocs]);
@@ -557,31 +578,63 @@ export const SourcesPanel: React.FC<Props> = memo(({
       )}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2.5 py-3">
-        {/* Section 1: Workspace Shelf + Library Trigger */}
-        <div>
-          <div className="mb-1.5 flex items-center justify-between gap-1.5 px-1.5">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <span className="text-[11px] font-semibold tracking-tight text-[#52525b]">검색 자료</span>
+        {/* Section 1: Workspace Shelf + Library Trigger (Collapsible to 1 compact top line) */}
+        <div data-section="sources">
+          <div className={`${sourcesCollapsed ? 'mb-0' : 'mb-1.5'} flex items-center justify-between gap-1 px-1`}>
+            <div className="flex min-w-0 items-center gap-1">
+              <button
+                type="button"
+                onClick={toggleSourcesCollapsed}
+                title={sourcesCollapsed ? '자료 공간 펼치기' : '자료 공간 한 줄로 줄이기'}
+                aria-label={sourcesCollapsed ? '자료 공간 펼치기' : '자료 공간 한 줄로 줄이기'}
+                aria-expanded={!sourcesCollapsed}
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[#52525b] transition hover:bg-black/[0.06] hover:text-[#18181b]"
+              >
+                {sourcesCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+              </button>
+              <button
+                type="button"
+                onClick={toggleSourcesCollapsed}
+                title={sourcesCollapsed ? '자료 공간 펼치기' : '자료 공간 한 줄로 줄이기'}
+                className="chip-nowrap text-[11px] font-semibold tracking-tight text-[#52525b] hover:text-[#18181b]"
+              >
+                검색 자료
+              </button>
               <span className="chip-nowrap rounded bg-[#0f4c81]/10 px-1.5 py-0.2 text-[10.5px] font-semibold text-[#0f4c81]">
-                {selectedOnShelfCount}/{shelfDocs.length} 선택
+                {selectedOnShelfCount}/{shelfDocs.length}
               </span>
             </div>
 
-            <div className="flex shrink-0 items-center gap-1">
-              {shelfDocs.length > 0 && (
+            <div className="flex shrink-0 items-center gap-0.5">
+              {sourcesCollapsed ? (
                 <button
                   type="button"
-                  onClick={() => onSelectAll(!allSelected)}
-                  className="chip-nowrap rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#71717a] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                  onClick={onOpenLibrary}
+                  title={`자료 라이브러리 열기 (전체 ${allDocumentCount}권)`}
+                  aria-label="자료 라이브러리 열기"
+                  className="chip-nowrap inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#0f4c81] transition hover:bg-[#0f4c81]/10"
                 >
-                  {allSelected ? '해제' : '전체'}
+                  <Library className="h-3 w-3" />
+                  <span>서고 {allDocumentCount}</span>
                 </button>
+              ) : (
+                shelfDocs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectAll(!allSelected)}
+                    title={allSelected ? '선택한 자료 모두 해제' : '작업대 자료 모두 선택'}
+                    className="chip-nowrap rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#71717a] transition hover:bg-black/[0.05] hover:text-[#18181b]"
+                  >
+                    {allSelected ? '해제' : '전체'}
+                  </button>
+                )
               )}
               {isAdmin && (
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
                   title="문서 자료 추가 (드래그&드롭 가능)"
+                  aria-label="문서 자료 추가"
                   className="chip-nowrap inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[#18181b] transition hover:bg-black/[0.06]"
                 >
                   <Plus className="h-3.5 w-3.5" />
@@ -591,74 +644,79 @@ export const SourcesPanel: React.FC<Props> = memo(({
             </div>
           </div>
 
-          {/* Prominent Library (서고) Drawer Button */}
-          <button
-            type="button"
-            onClick={onOpenLibrary}
-            className="mb-2.5 flex w-full items-center justify-between gap-2 rounded-xl border border-black/[0.08] bg-white px-2.5 py-2 text-left transition hover:border-[#0f4c81]/40 hover:bg-[#fafaf9]"
-          >
-            <div className="flex min-w-0 items-center gap-2">
-              <Library className="h-3.5 w-3.5 shrink-0 text-[#0f4c81]" />
-              <span className="truncate text-[12px] font-semibold text-[#18181b]">자료 라이브러리</span>
-            </div>
-            <div className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-[#71717a]">
-              <span className="chip-nowrap">전체 {allDocumentCount}권</span>
-              <ChevronRight className="h-3.5 w-3.5" />
-            </div>
-          </button>
+          {!sourcesCollapsed && (
+            <>
+              {/* Prominent Library (서고) Drawer Button */}
+              <button
+                type="button"
+                onClick={onOpenLibrary}
+                title="전체 자료 라이브러리(서고) 열기"
+                className="mb-2.5 flex w-full items-center justify-between gap-2 rounded-xl border border-black/[0.08] bg-white px-2.5 py-2 text-left transition hover:border-[#0f4c81]/40 hover:bg-[#fafaf9]"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <Library className="h-3.5 w-3.5 shrink-0 text-[#0f4c81]" />
+                  <span className="truncate text-[12px] font-semibold text-[#18181b]">자료 라이브러리</span>
+                </div>
+                <div className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-[#71717a]">
+                  <span className="chip-nowrap">전체 {allDocumentCount}권</span>
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </div>
+              </button>
 
-          {shelfDocs.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-black/[0.12] bg-white/60 p-4 text-center">
-              <p className="text-xs font-medium text-[#71717a]">
-                {allDocumentCount > 0 ? '작업대에 불러온 자료가 없습니다' : '등록된 자료가 없습니다'}
-              </p>
-              {allDocumentCount > 0 ? (
-                <button
-                  type="button"
-                  onClick={onOpenLibrary}
-                  className="chip-nowrap mt-2 inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
-                >
-                  <Library className="h-3 w-3" />
-                  <span>라이브러리에서 불러오기</span>
-                </button>
-              ) : (
-                isAdmin && (
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="chip-nowrap mt-2 inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
-                  >
-                    <Upload className="h-3 w-3" />
-                    <span>첫 자료 올리기</span>
-                  </button>
-                )
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {pinnedDocs.length > 0 && (
-                <div className="space-y-1">
-                  <p className="flex items-center gap-1 px-1.5 text-[10px] font-semibold text-[#8a8a8e]">
-                    <Pin className="h-2.5 w-2.5 text-[#0f4c81]" />
-                    <span>고정됨</span>
+              {shelfDocs.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-black/[0.12] bg-white/60 p-4 text-center">
+                  <p className="text-xs font-medium text-[#71717a]">
+                    {allDocumentCount > 0 ? '작업대에 불러온 자료가 없습니다' : '등록된 자료가 없습니다'}
                   </p>
-                  {pinnedDocs.map((doc) => renderDocRow(doc, true))}
-                </div>
-              )}
-
-              {loadedDocs.length > 0 && (
-                <div className="space-y-1">
-                  {pinnedDocs.length > 0 && (
-                    <p className="px-1.5 text-[10px] font-semibold text-[#8a8a8e]">작업대 자료</p>
+                  {allDocumentCount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={onOpenLibrary}
+                      className="chip-nowrap mt-2 inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
+                    >
+                      <Library className="h-3 w-3" />
+                      <span>라이브러리에서 불러오기</span>
+                    </button>
+                  ) : (
+                    isAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="chip-nowrap mt-2 inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-[#27272a]"
+                      >
+                        <Upload className="h-3 w-3" />
+                        <span>첫 자료 올리기</span>
+                      </button>
+                    )
                   )}
-                  {loadedDocs.map((doc) => renderDocRow(doc, false))}
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {pinnedDocs.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="flex items-center gap-1 px-1.5 text-[10px] font-semibold text-[#8a8a8e]">
+                        <Pin className="h-2.5 w-2.5 text-[#0f4c81]" />
+                        <span>고정됨</span>
+                      </p>
+                      {pinnedDocs.map((doc) => renderDocRow(doc, true))}
+                    </div>
+                  )}
+
+                  {loadedDocs.length > 0 && (
+                    <div className="space-y-1">
+                      {pinnedDocs.length > 0 && (
+                        <p className="px-1.5 text-[10px] font-semibold text-[#8a8a8e]">작업대 자료</p>
+                      )}
+                      {loadedDocs.map((doc) => renderDocRow(doc, false))}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
+            </>
           )}
         </div>
 
-        <div className="my-4 border-t border-black/[0.06]" />
+        <div className={`${sourcesCollapsed ? 'my-2.5' : 'my-4'} border-t border-black/[0.06]`} />
 
         {/* Section 2: Saved Chat Pages (Private / Group Collaborative / Team) */}
         <div className="flex min-h-0 flex-1 flex-col">

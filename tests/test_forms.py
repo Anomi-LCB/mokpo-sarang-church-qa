@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import xml.etree.ElementTree as ET
+import zipfile
 
 import docx
 import openpyxl
@@ -9,7 +11,8 @@ import pymupdf
 
 from core.config import DEFAULT_NOTEBOOK_ID
 from core.database import Database
-from core.forms import export_editable_docx, export_original_pdf, export_table_xlsx
+from core.forms import export_editable_docx, export_editable_hwpx, export_original_pdf, export_table_xlsx
+from core.ingest import _extract_hwpx_pages
 from server.cli_providers import generate_autofill_structure
 
 
@@ -44,6 +47,19 @@ def test_forms_catalog_and_all_export_formats(tmp_path: Path):
     ws = wb.active
     assert ws["A1"].value == target["title"]
     assert ws.max_row >= 4
+
+    # 3b. Editable Hancom HWPX (KS X 6101 OWPML)
+    hwpx_out = export_editable_hwpx(target, out_path=tmp_path / "blank.hwpx")
+    assert hwpx_out.exists() and hwpx_out.stat().st_size > 1200
+    with zipfile.ZipFile(str(hwpx_out), "r") as zf:
+        infos = zf.infolist()
+        assert infos[0].filename == "mimetype"
+        assert infos[0].compress_type == zipfile.ZIP_STORED
+        assert zf.read("mimetype").decode("utf-8") == "application/hwp+zip"
+        ET.fromstring(zf.read("Contents/header.xml"))
+        ET.fromstring(zf.read("Contents/section0.xml"))
+    parsed_hwpx = _extract_hwpx_pages(hwpx_out)
+    assert len(parsed_hwpx) >= 1 and target["title"] in parsed_hwpx[0]["text"]
 
     # 4. AI Auto-Fill (deterministic structured check + DOCX generation)
     structured = asyncio.run(
