@@ -282,20 +282,45 @@ export interface BackupItem {
   created_at: string;
 }
 
+export interface LanOptionItem {
+  ip: string;
+  label: string;
+  url: string;
+  is_wifi?: boolean;
+  has_gateway?: boolean;
+  recommended?: boolean;
+  selected?: boolean;
+}
+
+export interface NetworkReachability {
+  ok: boolean;
+  access_scope: 'public_https' | 'lan_only';
+  lan: { ok: boolean; url: string; latency_ms: number; version?: string; error: string };
+  public: { ok: boolean; url: string; latency_ms: number; version?: string; error: string } | null;
+}
+
 export interface NetworkSummary {
   port: number;
   local_url: string;
+  lan_ip?: string;
   lan_url: string;
   lan_qr: string;
+  lan_options?: LanOptionItem[];
+  access_scope?: 'public_https' | 'lan_only';
+  has_public_https?: boolean;
+  public_https_url?: string;
   tailscale: {
     installed: boolean;
+    logged_in?: boolean;
     ip: string;
     dns_name: string;
     funnel_active: boolean;
+    funnel_wrong_port?: boolean;
     funnel_url: string;
     suggested_funnel_url: string;
   };
   tailscale_url: string;
+  tailscale_qr?: string;
   cloudflare: {
     installed: boolean;
     active: boolean;
@@ -309,6 +334,8 @@ export interface NetworkSummary {
   apk_qr: string;
   apk_connect_url?: string;
   apk_connect_qr?: string;
+  smart_connect_url?: string;
+  smart_connect_qr?: string;
 }
 
 export interface StructuredFormDraft {

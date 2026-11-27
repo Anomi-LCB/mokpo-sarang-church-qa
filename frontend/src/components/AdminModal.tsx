@@ -54,6 +54,7 @@ import type {
   FeedbackInboxResponse,
   FeedbackStatus,
   FormItem,
+  NetworkReachability,
   NetworkSummary,
   Notebook,
   UpdateCheckResponse,
@@ -677,17 +678,56 @@ export const AdminModal: React.FC<Props> = ({
     }
   };
 
+  const [tsApprovalUrl, setTsApprovalUrl] = useState('');
+  const [testingReach, setTestingReach] = useState(false);
+  const [reachResult, setReachResult] = useState<NetworkReachability | null>(null);
+  const [tunnelBusyKind, setTunnelBusyKind] = useState<'tailscale' | 'cloudflare' | ''>('');
+
   const handleTunnel = async (action: 'start' | 'stop', kind: 'tailscale' | 'cloudflare') => {
     setBusyAction(true);
+    setTunnelBusyKind(kind);
     setMsg('');
+    setTsApprovalUrl('');
     try {
       const res = action === 'start' ? await api.startTunnel(kind) : await api.stopTunnel(kind);
       setMsg(res.message);
+      if (action === 'start' && 'approval_url' in res && typeof res.approval_url === 'string' && res.approval_url) {
+        setTsApprovalUrl(res.approval_url);
+      }
       await loadAll();
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : '터널 제어 오류');
+      setMsg(err instanceof Error ? err.message : '외부 연결 제어 오류');
+    } finally {
+      setTunnelBusyKind('');
+      setBusyAction(false);
+    }
+  };
+
+  const handleSelectLanIp = async (ip: string) => {
+    setBusyAction(true);
+    setMsg('');
+    setReachResult(null);
+    try {
+      const updated = isAdmin ? await api.setPreferredLanIp(ip) : await api.getNetwork(ip);
+      setNetwork(updated);
+      setMsg(`QR 접속 주소를 ${updated.lan_url} 기준으로 변경했습니다.`);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Wi-Fi 주소 변경 실패');
     } finally {
       setBusyAction(false);
+    }
+  };
+
+  const handleTestReachability = async () => {
+    setTestingReach(true);
+    setMsg('');
+    try {
+      const res = await api.testNetworkReachability();
+      setReachResult(res);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : '접속 점검 실패');
+    } finally {
+      setTestingReach(false);
     }
   };
 
@@ -920,109 +960,340 @@ export const AdminModal: React.FC<Props> = ({
             </div>
           ) : tab === 'connect' && network ? (
             <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-black/[0.08] p-3.5">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-[#007AFF]">
-                    <Globe className="h-4 w-4 shrink-0" />
-                    <span>외부 · 대표 접속 주소 (iOS PWA / 안드로이드)</span>
-                  </div>
-                  <div className="mt-3 flex justify-center">
-                    <img src={network.primary_external_qr} alt="외부 접속 QR" className="h-36 w-36 rounded-lg border border-black/[0.08] p-1" />
-                  </div>
-                  <div className="mt-2.5 flex items-center gap-1.5 rounded-lg bg-[#f5f5f7] px-2.5 py-1.5">
-                    <code className="min-w-0 flex-1 truncate text-[11px] text-[#1d1d1f]">{network.primary_external_url}</code>
-                    <button
-                      type="button"
-                      onClick={() => copyText('ext', network.primary_external_url)}
-                      className="shrink-0 rounded p-1 text-[#6e6e73] hover:bg-black/[0.06]"
+              {/* Clear Connection Mode Banner + Live Reachability Self-Check */}
+              <div
+                className={`flex flex-wrap items-center justify-between gap-2.5 rounded-xl border px-4 py-3 ${
+                  network.has_public_https
+                    ? 'border-emerald-200 bg-emerald-50/70'
+                    : 'border-[#0f4c81]/20 bg-[#0f4c81]/[0.05]'
+                }`}
+              >
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`chip-nowrap inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                        network.has_public_https
+                          ? 'bg-emerald-700 text-white'
+                          : 'bg-[#0f4c81] text-white'
+                      }`}
                     >
-                      {copiedKey === 'ext' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-                    </button>
+                      {network.has_public_https ? <Globe className="h-3 w-3" /> : <Wifi className="h-3 w-3" />}
+                      <span>
+                        {network.has_public_https ? '어디서나 접속 가능 (보안 HTTPS)' : '같은 Wi-Fi 내부망 연결 모드'}
+                      </span>
+                    </span>
+                    {reachResult && (
+                      <span
+                        className={`chip-nowrap inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
+                          reachResult.ok ? 'bg-emerald-100 text-emerald-900' : 'bg-red-100 text-red-800'
+                        }`}
+                      >
+                        {reachResult.ok ? <CheckCircle2 className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
+                        <span>
+                          {reachResult.public
+                            ? reachResult.public.ok
+                              ? `외부 HTTPS 응답 정상 (${reachResult.public.latency_ms}ms)`
+                              : `외부 주소 응답 확인 필요`
+                            : reachResult.lan.ok
+                              ? `내부 Wi-Fi 응답 정상 (${reachResult.lan.latency_ms}ms)`
+                              : `내부 Wi-Fi 응답 확인 필요`}
+                        </span>
+                      </span>
+                    )}
                   </div>
-                  <p className="mt-2 text-[11px] leading-relaxed text-[#6e6e73]">
-                    아이폰 Safari에서 접속 후 <strong>공유 → 홈 화면에 추가</strong>로 앱처럼 실행하세요.
+                  <p className="text-[11.5px] leading-relaxed text-[#52525b]">
+                    {network.has_public_https
+                      ? '교회 Wi-Fi, 집, 밖에서 5G/LTE 어디서나 스마트폰 기본 카메라로 왼쪽 QR 한 번만 찍으면 바로 열립니다.'
+                      : '이 PC와 같은 교회 Wi-Fi에 연결된 폰에서 바로 열립니다. 교회 밖(5G·집)에서도 열려면 아래에서 외부 접속을 켜 주세요.'}
                   </p>
                 </div>
-
-                <div className="rounded-xl border border-black/[0.08] p-3.5">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
-                    <Wifi className="h-4 w-4 shrink-0" />
-                    <span>같은 Wi-Fi (교회 사무실 내부망)</span>
-                  </div>
-                  <div className="mt-3 flex justify-center">
-                    <img src={network.lan_qr} alt="Wi-Fi 접속 QR" className="h-36 w-36 rounded-lg border border-black/[0.08] p-1" />
-                  </div>
-                  <div className="mt-2.5 flex items-center gap-1.5 rounded-lg bg-[#f5f5f7] px-2.5 py-1.5">
-                    <code className="min-w-0 flex-1 truncate text-[11px] text-[#1d1d1f]">{network.lan_url}</code>
-                    <button
-                      type="button"
-                      onClick={() => copyText('lan', network.lan_url)}
-                      className="shrink-0 rounded p-1 text-[#6e6e73] hover:bg-black/[0.06]"
-                    >
-                      {copiedKey === 'lan' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
-                  <p className="mt-2 text-[11px] leading-relaxed text-[#6e6e73]">
-                    PC와 같은 공유기에 연결된 폰·노트북에서 가장 빠르게 접속됩니다.
-                  </p>
+                <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={testingReach}
+                    onClick={() => void handleTestReachability()}
+                    className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.12] bg-white px-2.5 py-1.5 text-[11.5px] font-semibold text-[#18181b] hover:bg-[#f4f4f2] disabled:opacity-50"
+                  >
+                    {testingReach ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5 text-[#0f4c81]" />}
+                    <span>접속 점검</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadAll()}
+                    title="네트워크 주소 새로고침"
+                    className="rounded-lg border border-black/[0.12] bg-white p-1.5 text-[#52525b] hover:bg-[#f4f4f2]"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
 
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 space-y-3">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-900">
-                      <Smartphone className="h-4 w-4 shrink-0" />
-                      <span>안드로이드 하이브리드 앱 (.apk · 오프라인 내장)</span>
+              {/* 2 Clean High-Contrast ISO-Standard QRs (Zero dead 100.x.x.x VPN IP!) */}
+              <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+                {/* QR 1: Primary Direct Open QR */}
+                <div className="flex flex-col justify-between rounded-xl border border-black/[0.08] bg-white p-4">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-[#0f4c81]">
+                        {network.has_public_https ? (
+                          <Globe className="h-4 w-4 shrink-0" />
+                        ) : (
+                          <Wifi className="h-4 w-4 shrink-0" />
+                        )}
+                        <span>
+                          {network.has_public_https
+                            ? '어디서나 바로 접속 QR (대표)'
+                            : '같은 Wi-Fi 바로 접속 QR (대표)'}
+                        </span>
+                      </div>
+                      <span className="chip-nowrap rounded bg-[#f4f4f2] px-1.5 py-0.5 text-[10px] font-semibold text-[#52525b]">
+                        기본 카메라 스캔
+                      </span>
                     </div>
-                    <p className="text-[11px] leading-relaxed text-emerald-800">
-                      ① 아래 QR로 <code>목포사랑의교회-행정Q&amp;A.apk</code>를 설치하면 919쪽 전체 색인과 서식 PDF 60종이 앱 안에 포함됩니다.
-                      <br />② 설치 후 오른쪽 <strong>1스캔 자동 연결 QR</strong>을 스캔하면 주소 입력 없이 Tailscale·Wi-Fi가 즉시 연동됩니다.
+
+                    <div className="mt-3 flex justify-center">
+                      <div
+                        className="rounded-xl border border-black/[0.08] p-2 shadow-xs"
+                        style={{ backgroundColor: '#ffffff' }}
+                      >
+                        <img
+                          src={network.primary_external_qr}
+                          alt="외부 접속 QR"
+                          className="h-40 w-40 object-contain"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-3 flex items-center gap-1.5 rounded-lg bg-[#f5f5f7] px-2.5 py-1.5">
+                      <code className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-[#18181b]">
+                        {network.primary_external_url}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => copyText('ext', network.primary_external_url)}
+                        title="접속 주소 복사"
+                        className="shrink-0 rounded p-1 text-[#6e6e73] hover:bg-black/[0.06]"
+                      >
+                        {copiedKey === 'ext' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+
+                    {/* Multi-LAN Adapter Switcher when PC has 2+ physical NICs */}
+                    {!network.has_public_https && (network.lan_options?.length || 0) > 1 && (
+                      <div className="mt-2.5 space-y-1.5 rounded-lg border border-black/[0.06] bg-[#fafaf9] p-2.5">
+                        <p className="text-[10.5px] font-semibold text-[#52525b]">
+                          이 PC에 네트워크가 {network.lan_options?.length}개 있습니다 (안 열리면 다른 주소 선택)
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          {(network.lan_options || []).map((opt) => (
+                            <button
+                              key={opt.ip}
+                              type="button"
+                              disabled={busyAction}
+                              onClick={() => void handleSelectLanIp(opt.ip)}
+                              className={`chip-nowrap rounded-md px-2 py-1 text-[10.5px] font-semibold transition ${
+                                opt.selected
+                                  ? 'bg-[#18181b] text-white'
+                                  : 'border border-black/[0.1] bg-white text-[#3f3f46] hover:bg-black/[0.04]'
+                              }`}
+                            >
+                              {opt.label} ({opt.ip})
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="mt-2.5 text-[11px] leading-relaxed text-[#6e6e73]">
+                    {network.has_public_https ? (
+                      <>
+                        아이폰 Safari에서 연 뒤 <strong>공유 → 홈 화면에 추가</strong>를 누르면 앱처럼 바로 실행됩니다.
+                      </>
+                    ) : (
+                      <>
+                        폰과 PC가 <strong>같은 교회 Wi-Fi</strong>에 연결된 상태에서 카메라로 스캔하면 즉시 열립니다.
+                      </>
+                    )}
+                  </p>
+                </div>
+
+                {/* QR 2: Universal Camera-Safe Smart Connect & Android APK Card */}
+                <div className="flex flex-col justify-between rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-900">
+                        <Smartphone className="h-4 w-4 shrink-0" />
+                        <span>안드로이드 앱 설치 · 1스캔 자동 연결</span>
+                      </div>
+                      <span className="chip-nowrap rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-900">
+                        오프라인 내장
+                      </span>
+                    </div>
+
+                    <div className="mt-3 flex justify-center">
+                      <div
+                        className="rounded-xl border border-emerald-200 p-2 shadow-xs"
+                        style={{ backgroundColor: '#ffffff' }}
+                      >
+                        <img
+                          src={network.smart_connect_qr || network.apk_connect_qr || network.primary_external_qr}
+                          alt="APK 자동 연결 QR"
+                          className="h-40 w-40 object-contain"
+                        />
+                      </div>
+                    </div>
+
+                    <p className="mt-2.5 text-[11px] leading-relaxed text-emerald-900">
+                      기본 카메라로 찍으면 전용 연결 페이지가 열려 <strong>APK 설치(919쪽 오프라인 내장)</strong>와 <strong>앱 자동 연결</strong>을 버튼 한 번으로 끝낼 수 있습니다.
                     </p>
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      {network.apk_available && (
-                        <a
-                          href="/downloads/mokpo-sarang-qa.apk"
-                          className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>목포사랑의교회-행정Q&amp;A.apk 받기</span>
-                        </a>
-                      )}
-                      {network.apk_connect_url && (
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {network.apk_available && (
+                      <a
+                        href="/downloads/mokpo-sarang-qa.apk"
+                        className="chip-nowrap inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>APK 파일 직접 받기</span>
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        copyText('smart_conn', network.smart_connect_url || network.primary_external_url)
+                      }
+                      className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-emerald-900 hover:bg-emerald-50"
+                    >
+                      {copiedKey === 'smart_conn' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                      <span>연결 링크 복사</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* 1-Click External HTTPS Controls (Easiest 2 Ways for Church Admin) */}
+              {isAdmin && (
+                <div className="space-y-2.5 rounded-xl border border-black/[0.08] bg-white p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <h4 className="text-xs font-semibold text-[#18181b]">
+                        밖에서도(5G · 집) 접속 열기 — 가장 쉬운 2가지 방법
+                      </h4>
+                      <p className="mt-0.5 text-[11px] text-[#71717a]">
+                        외부 보안 주소(HTTPS)를 켜면 위 QR 코드가 즉시 외부 접속 주소로 바뀌고 아이폰 오프라인 저장도 활성화됩니다.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Method 1: Zero-login instant Cloudflare HTTPS */}
+                  <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-black/[0.07] bg-[#fafaf9] p-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="chip-nowrap rounded bg-[#0f4c81] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                          가장 쉬움 · 로그인 불필요
+                        </span>
+                        <p className="text-xs font-semibold text-[#18181b]">
+                          즉시 외부 주소 켜기 (Cloudflare 무료 HTTPS)
+                        </p>
+                      </div>
+                      <p className="mt-0.5 truncate text-[11px] text-[#71717a]">
+                        {network.cloudflare.active
+                          ? `활성 중: ${network.cloudflare.url}`
+                          : '계정 없이 버튼 1번으로 5초 만에 외부 접속 QR 생성 (PC 재시작 시 새 주소 발급)'}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 gap-1.5">
+                      {!network.cloudflare.active ? (
                         <button
                           type="button"
-                          onClick={() => copyText('apk_conn', network.apk_connect_url || '')}
-                          className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-900 hover:bg-emerald-50"
+                          disabled={busyAction}
+                          onClick={() => void handleTunnel('start', 'cloudflare')}
+                          className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-50"
                         >
-                          {copiedKey === 'apk_conn' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-                          <span>자동 연결 링크 복사</span>
+                          {tunnelBusyKind === 'cloudflare' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                          <span>{tunnelBusyKind === 'cloudflare' ? '주소 여는 중...' : '바로 켜기'}</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={busyAction}
+                          onClick={() => void handleTunnel('stop', 'cloudflare')}
+                          className="chip-nowrap rounded-lg border border-black/[0.12] bg-white px-3 py-1.5 text-xs font-semibold text-[#18181b]"
+                        >
+                          끄기
                         </button>
                       )}
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2.5">
-                    {network.apk_qr && (
-                      <div className="text-center">
-                        <img src={network.apk_qr} alt="APK 다운로드 QR" className="h-24 w-24 rounded-lg border border-emerald-200 bg-white p-1" />
-                        <p className="mt-1 text-[10px] font-semibold text-emerald-900">① APK 설치</p>
+
+                  {/* Method 2: Permanent fixed HTTPS domain via Tailscale Funnel */}
+                  <div className="space-y-2 rounded-xl border border-black/[0.07] bg-[#fafaf9] p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="chip-nowrap rounded bg-[#18181b] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                            평생 고정 주소
+                          </span>
+                          <p className="text-xs font-semibold text-[#18181b]">
+                            Tailscale 고정 HTTPS {network.tailscale.funnel_active ? '(켜짐)' : '(꺼짐)'}
+                          </p>
+                        </div>
+                        <p className="mt-0.5 truncate text-[11px] text-[#71717a]">
+                          {network.tailscale.installed
+                            ? network.tailscale.suggested_funnel_url || 'Tailscale 로그인 후 평생 바뀌지 않는 고정 주소 사용'
+                            : 'Tailscale 미설치 (설치 마법사에서 함께 설치 가능)'}
+                        </p>
                       </div>
-                    )}
-                    {network.apk_connect_qr && (
-                      <div className="text-center">
-                        <img src={network.apk_connect_qr} alt="APK 자동 연결 QR" className="h-24 w-24 rounded-lg border border-emerald-200 bg-white p-1" />
-                        <p className="mt-1 text-[10px] font-semibold text-emerald-900">② 1스캔 연결</p>
+                      {network.tailscale.installed && (
+                        <div className="flex shrink-0 gap-1.5">
+                          <button
+                            type="button"
+                            disabled={busyAction}
+                            onClick={() => void handleTunnel('start', 'tailscale')}
+                            className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#18181b] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#27272a] disabled:opacity-50"
+                          >
+                            {tunnelBusyKind === 'tailscale' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                            <span>{network.tailscale.funnel_active ? '다시 적용' : '고정 주소 켜기'}</span>
+                          </button>
+                          {network.tailscale.funnel_active && (
+                            <button
+                              type="button"
+                              disabled={busyAction}
+                              onClick={() => void handleTunnel('stop', 'tailscale')}
+                              className="chip-nowrap rounded-lg border border-black/[0.12] bg-white px-3 py-1.5 text-xs font-semibold text-[#18181b]"
+                            >
+                              끄기
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {tsApprovalUrl && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-950">
+                        <span>처음 1회만 Tailscale 페이지에서 허용 버튼을 눌러 주시면 바로 켜집니다.</span>
+                        <a
+                          href={tsApprovalUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-amber-700 px-2.5 py-1 font-semibold text-white hover:bg-amber-800"
+                        >
+                          <span>허용 페이지 열기</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
                       </div>
                     )}
                   </div>
                 </div>
-              </div>
+              )}
 
               {/* Offline PWA Storage Card (iPhone / iPad / Browser) */}
-              <div className="rounded-xl border border-black/[0.08] bg-[#fbfbfd] p-4 space-y-2.5">
+              <div className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-[#1d1d1f]">
-                    <WifiOff className="h-4 w-4 shrink-0 text-[#007AFF]" />
+                    <WifiOff className="h-4 w-4 shrink-0 text-[#0f4c81]" />
                     <span>기기 오프라인 저장 (아이폰 PWA · 브라우저)</span>
                   </div>
                   <span className="chip-nowrap rounded-full bg-black/[0.05] px-2 py-0.5 text-[10.5px] font-medium text-[#6e6e73]">
@@ -1030,14 +1301,14 @@ export const AdminModal: React.FC<Props> = ({
                   </span>
                 </div>
                 <p className="text-[11px] leading-relaxed text-[#6e6e73]">
-                  아이폰 Safari에서 <Share className="inline h-3 w-3 align-text-bottom text-[#007AFF]" /> <strong>공유 → 홈 화면에 추가</strong> 후 아래 버튼으로 저장해 두면 비행기 모드·PC 꺼짐 상태에서도 919쪽 검색과 서식 PDF 열람이 가능합니다.
+                  아이폰 Safari에서 <Share className="inline h-3 w-3 align-text-bottom text-[#0f4c81]" /> <strong>공유 → 홈 화면에 추가</strong> 후 아래 버튼으로 저장해 두면 비행기 모드·PC 꺼짐 상태에서도 919쪽 검색과 서식 PDF 열람이 가능합니다.
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     disabled={busyAction || !activeNotebook}
                     onClick={() => void handleSyncOfflineIndex()}
-                    className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#007AFF] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#0066D6] disabled:opacity-45"
+                    className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-45"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
                     <span>원문 색인 지금 동기화</span>
@@ -1049,58 +1320,44 @@ export const AdminModal: React.FC<Props> = ({
                       onClick={() => void handleSyncAllOfflinePdfs()}
                       className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg border border-black/[0.12] bg-white px-3 py-1.5 text-xs font-semibold text-[#1d1d1f] hover:bg-[#f5f5f7] disabled:opacity-45"
                     >
-                      <HardDrive className="h-3.5 w-3.5 text-[#007AFF]" />
+                      <HardDrive className="h-3.5 w-3.5 text-[#0f4c81]" />
                       <span>{pdfSyncProgress || `서식 PDF ${forms.length}종 오프라인 저장`}</span>
                     </button>
                   )}
                 </div>
               </div>
 
-              {isAdmin && (
-                <div className="space-y-2.5 rounded-xl border border-black/[0.08] p-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-semibold text-[#1d1d1f]">외부 상시 HTTPS 터널 제어</h4>
-                    <button
-                      type="button"
-                      onClick={() => void loadAll()}
-                      className="chip-nowrap inline-flex items-center gap-1 text-[11px] text-[#6e6e73] hover:text-[#1d1d1f]"
-                    >
-                      <RefreshCw className="h-3 w-3" />
-                      <span>새로고침</span>
-                    </button>
-                  </div>
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#f5f5f7] p-3">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-semibold text-[#1d1d1f]">
-                        Tailscale Funnel {network.tailscale.funnel_active ? '(활성화됨)' : '(대기 중)'}
-                      </p>
-                      <p className="truncate text-[11px] text-[#6e6e73]">
-                        {network.tailscale.installed
-                          ? network.tailscale.suggested_funnel_url || `Tailscale IP: ${network.tailscale.ip}`
-                          : 'Tailscale 미설치'}
-                      </p>
+              {/* Subtle Secondary Addresses (Local Wi-Fi when HTTPS active, & Tailscale-app-only private IP) */}
+              {(network.has_public_https || network.tailscale_url) && (
+                <div className="rounded-xl border border-black/[0.06] bg-[#f7f7f5] px-3.5 py-2.5 space-y-1.5 text-[11px] text-[#71717a]">
+                  {network.has_public_https && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate">
+                        같은 Wi-Fi 직접 주소: <code className="text-[#18181b]">{network.lan_url}</code>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => copyText('lan_sub', network.lan_url)}
+                        className="chip-nowrap rounded px-2 py-0.5 text-[10.5px] font-semibold text-[#3f3f46] hover:bg-black/[0.06]"
+                      >
+                        {copiedKey === 'lan_sub' ? '복사됨' : '복사'}
+                      </button>
                     </div>
-                    {network.tailscale.installed && (
-                      <div className="flex gap-1.5">
-                        <button
-                          type="button"
-                          disabled={busyAction}
-                          onClick={() => void handleTunnel('start', 'tailscale')}
-                          className="chip-nowrap rounded-lg bg-[#007AFF] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#0066D6]"
-                        >
-                          Funnel 켜기
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busyAction}
-                          onClick={() => void handleTunnel('stop', 'tailscale')}
-                          className="chip-nowrap rounded-lg border border-black/[0.12] bg-white px-3 py-1.5 text-xs font-semibold text-[#1d1d1f]"
-                        >
-                          끄기
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  )}
+                  {network.tailscale_url && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate">
+                        Tailscale 앱 설치 기기 전용 IP: <code className="text-[#18181b]">{network.tailscale_url}</code>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => copyText('ts_sub', network.tailscale_url)}
+                        className="chip-nowrap rounded px-2 py-0.5 text-[10.5px] font-semibold text-[#3f3f46] hover:bg-black/[0.06]"
+                      >
+                        {copiedKey === 'ts_sub' ? '복사됨' : '복사'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

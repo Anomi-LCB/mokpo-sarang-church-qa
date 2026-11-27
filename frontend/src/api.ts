@@ -17,6 +17,7 @@ import type {
   FormItem,
   GroupsResponse,
   MemberDirectoryItem,
+  NetworkReachability,
   NetworkSummary,
   Notebook,
   QuickSearchResult,
@@ -569,9 +570,16 @@ export const api = {
       { method: 'POST' }
     ),
 
-  getNetwork: () => reqJson<NetworkSummary>('/api/admin/network'),
+  getNetwork: (lanIp = '') =>
+    reqJson<NetworkSummary>(`/api/admin/network${lanIp ? `?lan_ip=${encodeURIComponent(lanIp)}` : ''}`),
+  setPreferredLanIp: (lan_ip: string) =>
+    reqJson<NetworkSummary>('/api/admin/network/lan-ip', {
+      method: 'PUT',
+      body: JSON.stringify({ lan_ip }),
+    }),
+  testNetworkReachability: () => reqJson<NetworkReachability>('/api/admin/network/test'),
   startTunnel: (kind: 'tailscale' | 'cloudflare', token = '') =>
-    reqJson<{ ok: boolean; url?: string; message: string }>('/api/admin/tunnel/start', {
+    reqJson<{ ok: boolean; url?: string; approval_url?: string; message: string }>('/api/admin/tunnel/start', {
       method: 'POST',
       body: JSON.stringify({ kind, token }),
     }),

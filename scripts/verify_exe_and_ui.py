@@ -402,11 +402,17 @@ def main() -> None:
             dpage.click('header button[aria-label="다크 모드 전환"]')
             dpage.wait_for_timeout(180)
 
-            # Open Connect / QR modal & verify QR images (External, APK install, and APK 1-scan auto-connect)
+            # Open Connect / QR modal & verify accurate QR (zero dead 100.x Tailscale VPN IP in primary QR + live reachability check!)
             dpage.click('header button[title="모바일 QR 연결 및 APK"]')
             dpage.wait_for_selector('img[alt="외부 접속 QR"]', timeout=8000)
             dpage.wait_for_selector('img[alt="APK 자동 연결 QR"]', timeout=8000)
-            dpage.wait_for_timeout(350)
+            dpage.wait_for_timeout(300)
+            qr_url_txt = dpage.locator('div[data-modal="settings"] code').first.inner_text().strip()
+            print(f"[AUDIT ConnectQR-PrimaryURL] {qr_url_txt}", flush=True)
+            assert not qr_url_txt.startswith("http://100."), f"Dead Tailscale private VPN IP leaked into primary QR: {qr_url_txt}"
+            dpage.click('div[data-modal="settings"] button:has-text("접속 점검")')
+            dpage.wait_for_selector("text=응답 정상", timeout=8000)
+            dpage.wait_for_timeout(200)
             audit_geometry(dpage, "Desktop-1440x900-ConnectQR")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_qr.png"))
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
@@ -450,7 +456,7 @@ def main() -> None:
                 }"""
             )
             print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.2.0", f"Expected v4.2.0, got {eng_status}"
+            assert eng_status.get("version") == "4.2.1", f"Expected v4.2.1, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")

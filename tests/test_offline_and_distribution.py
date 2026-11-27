@@ -105,6 +105,51 @@ def test_apk_connect_deeplink_qr() -> None:
     assert summary["apk_connect_url"].startswith("churchsearch://connect?url=")
     assert "church.example.ts.net" in summary["apk_connect_url"]
     assert summary["apk_connect_qr"].startswith("data:image/png;base64,")
+    assert summary["smart_connect_url"].startswith("https://church.example.ts.net/connect?url=")
+    assert summary["smart_connect_qr"].startswith("data:image/png;base64,")
+    assert summary["has_public_https"] is True
+    assert summary["access_scope"] == "public_https"
+
+
+def test_qr_excludes_private_tailscale_vpn_ip_and_serves_smart_connect_page() -> None:
+    tm = NetworkTunnelManager(port=17865)
+    fake_ts = {
+        "installed": True,
+        "logged_in": True,
+        "ip": "100.106.197.23",
+        "dns_name": "desktop-test.tail.ts.net",
+        "funnel_active": False,
+        "funnel_url": "",
+        "suggested_funnel_url": "https://desktop-test.tail.ts.net",
+    }
+    with patch.object(tm, "get_tailscale_info", return_value=fake_ts):
+        summary = tm.get_network_summary(custom_public_url="", apk_available=True)
+
+    # Critical fix: private 100.64.0.0/10 Tailscale VPN IP must NEVER appear in primary or smart QR!
+    assert summary["has_public_https"] is False
+    assert summary["access_scope"] == "lan_only"
+    assert "100.106.197.23" not in summary["primary_external_url"]
+    assert "100.106.197.23" not in summary["apk_url"]
+    assert "100.106.197.23" not in summary["smart_connect_url"]
+    assert summary["primary_external_url"] == summary["lan_url"]
+    assert summary["tailscale_url"] == "http://100.106.197.23:17865"
+
+    # Verify /connect universal mobile landing page renders cleanly without auth!
+    app = create_app()
+    with TestClient(app) as client:
+        r = client.get("/connect?url=http%3A%2F%2F192.168.0.63%3A17865&lan=http%3A%2F%2F192.168.0.63%3A17865")
+        assert r.status_code == 200
+        assert "모바일 간편 연결" in r.text
+        assert "churchsearch://connect?url=" in r.text
+        assert "웹으로 바로 시작하기" in r.text
+
+        # Verify preferred LAN IP selector endpoint works & excludes virtual/VPN IPs
+        headers = _login_headers(client)
+        r_lan = client.put("/api/admin/network/lan-ip", headers=headers, json={"lan_ip": ""})
+        assert r_lan.status_code == 200
+        lan_opts = r_lan.json()["lan_options"]
+        assert all("172.25." not in o["ip"] and not o["ip"].startswith("100.") for o in lan_opts), lan_opts
+        assert "100." not in r_lan.json()["primary_external_url"]
 
 
 def test_portable_stored_path_resolution() -> None:

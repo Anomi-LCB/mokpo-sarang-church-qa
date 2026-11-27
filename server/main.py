@@ -65,7 +65,7 @@ from server.event_bus import RealtimeEventBus
 from server.groups_routes import router as groups_router
 from server.queue_manager import QueryQueueManager
 from server.std_routes import router as std_router
-from server.tunnel import NetworkTunnelManager
+from server.tunnel import NetworkTunnelManager, probe_url_health
 from server.updater import UpdateManager, get_local_releases_dir, get_updates_dir
 from core.std_store import StandardizationStore
 
@@ -1888,27 +1888,70 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
         return {"ok": True, "cache": request.app.state.answer_cache.stats()}
 
     @app.get("/api/admin/network")
-    def get_network(request: Request, _: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    def get_network(request: Request, lan_ip: str = "", _: AuthUser = Depends(require_user)) -> dict[str, Any]:
         db: Database = request.app.state.db
         tunnel: NetworkTunnelManager = request.app.state.tunnel
         custom_url = db.get_setting("custom_public_url", "") or ""
+        saved_lan = db.get_setting("preferred_lan_ip", "") or ""
         apk = _find_apk_path()
-        return tunnel.get_network_summary(custom_public_url=custom_url, apk_available=bool(apk))
+        return tunnel.get_network_summary(
+            custom_public_url=custom_url,
+            apk_available=bool(apk),
+            preferred_lan_ip=lan_ip.strip() or saved_lan,
+        )
+
+    @app.put("/api/admin/network/lan-ip")
+    def set_preferred_lan_ip(body: dict[str, str], request: Request, _: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+        db: Database = request.app.state.db
+        tunnel: NetworkTunnelManager = request.app.state.tunnel
+        chosen = str(body.get("lan_ip") or "").strip()
+        db.set_setting("preferred_lan_ip", chosen)
+        custom_url = db.get_setting("custom_public_url", "") or ""
+        apk = _find_apk_path()
+        return tunnel.get_network_summary(
+            custom_public_url=custom_url,
+            apk_available=bool(apk),
+            preferred_lan_ip=chosen,
+        )
+
+    @app.get("/api/admin/network/test")
+    async def test_network_reachability(request: Request, _: AuthUser = Depends(require_user)) -> dict[str, Any]:
+        db: Database = request.app.state.db
+        tunnel: NetworkTunnelManager = request.app.state.tunnel
+        custom_url = db.get_setting("custom_public_url", "") or ""
+        saved_lan = db.get_setting("preferred_lan_ip", "") or ""
+        summary = tunnel.get_network_summary(
+            custom_public_url=custom_url,
+            apk_available=bool(_find_apk_path()),
+            preferred_lan_ip=saved_lan,
+        )
+        lan_probe = await asyncio.to_thread(probe_url_health, summary["lan_url"], 3.0)
+        pub_probe = (
+            await asyncio.to_thread(probe_url_health, summary["public_https_url"], 5.0)
+            if summary["has_public_https"]
+            else None
+        )
+        return {
+            "ok": bool(pub_probe["ok"]) if pub_probe else bool(lan_probe["ok"]),
+            "access_scope": summary["access_scope"],
+            "lan": lan_probe,
+            "public": pub_probe,
+        }
 
     @app.post("/api/admin/tunnel/start")
-    def start_tunnel(body: TunnelActionReq, request: Request, _: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    async def start_tunnel(body: TunnelActionReq, request: Request, _: AuthUser = Depends(require_admin)) -> dict[str, Any]:
         tunnel: NetworkTunnelManager = request.app.state.tunnel
         if body.kind == "cloudflare":
-            return tunnel.start_cloudflare_tunnel(named_token=body.token)
-        return tunnel.start_tailscale_funnel()
+            return await asyncio.to_thread(tunnel.start_cloudflare_tunnel, body.token, True)
+        return await asyncio.to_thread(tunnel.start_tailscale_funnel)
 
     @app.post("/api/admin/tunnel/stop")
-    def stop_tunnel(body: TunnelActionReq, request: Request, _: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    async def stop_tunnel(body: TunnelActionReq, request: Request, _: AuthUser = Depends(require_admin)) -> dict[str, Any]:
         tunnel: NetworkTunnelManager = request.app.state.tunnel
         if body.kind == "cloudflare":
-            tunnel.stop_cloudflare_tunnel()
-            return {"ok": True, "message": "Cloudflare 터널을 중지했습니다."}
-        return tunnel.stop_tailscale_funnel()
+            await asyncio.to_thread(tunnel.stop_cloudflare_tunnel)
+            return {"ok": True, "message": "Cloudflare 외부 연결을 껐습니다."}
+        return await asyncio.to_thread(tunnel.stop_tailscale_funnel)
 
     # ---- Creator-Only Feedback / Bug / Improvement Reporting ----
     def _relay_feedback_to_creator(relay_url: str, relay_token: str, payload: dict[str, Any]) -> bool:
@@ -2071,6 +2114,77 @@ def create_app(db_path: Path | None = None, port: int | None = None, on_shutdown
             db.set_setting("creator_relay_token_out", body.creator_relay_token_out.strip())
         db.log_audit("creator_settings", user.role, user.label, get_client_ip(request), "제작자 제보함 설정 변경")
         return {"ok": True, "has_custom_creator_pin": auth.has_custom_creator_pin()}
+
+    # ---- Camera-Universal Smart Connect Landing Page (/connect) ----
+    @app.get("/connect", response_class=HTMLResponse)
+    def smart_connect_page(request: Request, url: str = "", lan: str = "") -> HTMLResponse:
+        """
+        Universal mobile landing page scanned by ANY iPhone or Android default camera.
+        Eliminates unsupported custom-scheme camera errors and guides Android/iOS cleanly in 1 tap.
+        """
+        import html as _html
+
+        base = (url or str(request.base_url)).strip().rstrip("/")
+        lan_clean = (lan or base).strip().rstrip("/")
+        deep_link = f"churchsearch://connect?url={quote(base, safe='')}&lan={quote(lan_clean, safe='')}"
+        apk_exists = bool(_find_apk_path())
+        is_https = base.lower().startswith("https://")
+        safe_base = _html.escape(base, quote=True)
+        safe_deep = _html.escape(deep_link, quote=True)
+        apk_btn = (
+            '<a class="btn btn-sec" href="/downloads/mokpo-sarang-qa.apk">안드로이드 앱(.apk) 다운로드 · 설치</a>'
+            if apk_exists
+            else ""
+        )
+        ios_note = (
+            "Safari 하단의 <strong>공유 버튼 → 홈 화면에 추가</strong>를 누르면 앱처럼 바로 열리고 오프라인 검색도 지원됩니다."
+            if is_https
+            else "현재 교회 내부 Wi-Fi 주소(HTTP)로 연결되었습니다. 웹 화면에서 바로 검색·서식 작성을 사용할 수 있습니다."
+        )
+        page_html = f"""<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>{_html.escape(APP_NAME)} · 모바일 빠른 연결</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif; background:#f7f7f5; color:#18181b; padding:24px 16px; word-break:keep-all; }}
+  .card {{ max-width:420px; margin:20px auto; background:#fff; border:1px solid rgba(0,0,0,0.08); border-radius:20px; padding:24px 20px; box-shadow:0 8px 28px rgba(0,0,0,0.06); }}
+  .badge {{ display:inline-block; font-size:12px; font-weight:700; color:#0f4c81; background:rgba(15,76,129,0.1); padding:4px 10px; border-radius:99px; }}
+  h1 {{ margin:12px 0 6px; font-size:20px; letter-spacing:-0.02em; }}
+  .sub {{ margin:0 0 18px; font-size:13.5px; line-height:1.55; color:#52525b; }}
+  .url {{ background:#f4f4f2; border-radius:10px; padding:10px 12px; font-size:12px; color:#3f3f46; word-break:break-all; margin-bottom:16px; }}
+  .btn {{ display:block; width:100%; text-align:center; text-decoration:none; font-weight:700; font-size:14.5px; padding:13px 16px; border-radius:12px; margin-bottom:10px; }}
+  .btn-pri {{ background:#18181b; color:#fff; }}
+  .btn-app {{ background:#0f4c81; color:#fff; }}
+  .btn-sec {{ background:#f4f4f2; color:#18181b; border:1px solid rgba(0,0,0,0.1); }}
+  .tip {{ margin-top:14px; padding:12px; border-radius:12px; background:#fafaf9; border:1px solid rgba(0,0,0,0.06); font-size:12.5px; line-height:1.6; color:#52525b; }}
+  .android-only {{ display:none; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">모바일 간편 연결</span>
+    <h1>{_html.escape(APP_NAME)}</h1>
+    <p class="sub">서버 연결이 확인되었습니다. 사용 중인 기기에 맞는 버튼을 한 번만 눌러 바로 시작하세요.</p>
+    <div class="url">{safe_base}</div>
+    <a class="btn btn-pri" href="/">웹으로 바로 시작하기 (아이폰 · 안드로이드)</a>
+    <div id="androidBox" class="android-only">
+      <a class="btn btn-app" href="{safe_deep}">설치된 안드로이드 앱 자동 연결</a>
+      {apk_btn}
+    </div>
+    <div class="tip" id="iosTip">{ios_note}</div>
+  </div>
+  <script>
+    if (/Android/i.test(navigator.userAgent || "")) {{
+      var box = document.getElementById("androidBox");
+      if (box) box.style.display = "block";
+    }}
+  </script>
+</body>
+</html>"""
+        return HTMLResponse(page_html)
 
     # ---- Android APK direct download (supports both legacy & branded paths) ----
     @app.get("/downloads/church-search.apk")
