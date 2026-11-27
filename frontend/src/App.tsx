@@ -19,7 +19,6 @@ import {
   SlidersHorizontal,
   Sun,
   UserCheck,
-  Users,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -181,6 +180,13 @@ export function App() {
       return false;
     }
   });
+  const [citationDisplayMode, setCitationDisplayMode] = useState<'inline' | 'popup'>(() => {
+    try {
+      return localStorage.getItem('church_search_citation_mode') === 'popup' ? 'popup' : 'inline';
+    } catch {
+      return 'inline';
+    }
+  });
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadThemeMode());
   const [isDark, setIsDark] = useState<boolean>(() => resolveIsDark(loadThemeMode()));
   const [profileName, setProfileName] = useState<string>(() => loadUserProfile().name || '');
@@ -239,6 +245,15 @@ export function App() {
     }
     if (disabled && mobileTab === 'forms') {
       setMobileTab('chat');
+    }
+  };
+
+  const handleCitationDisplayMode = (next: 'inline' | 'popup') => {
+    setCitationDisplayMode(next);
+    try {
+      localStorage.setItem('church_search_citation_mode', next);
+    } catch {
+      // ignore
     }
   };
 
@@ -1049,26 +1064,9 @@ export function App() {
             </div>
           )}
 
-          {/* Group & Feedback moved right next to 표준화실 on the left (icon-only + hover name tooltip) */}
+          {/* Feedback icon moved right next to 표준화실 on the left (Group is in left sidebar beside 대화) */}
           {!isOfflineMode && (
             <div className="flex shrink-0 items-center gap-0.5">
-              <ToolbarTip
-                label={`그룹${groups.length > 0 ? ` (${groups.length})` : ''} · 협업·초대·공동 대화`}
-                align="left"
-              >
-                <button
-                  type="button"
-                  onClick={() => setShowGroupsModal(true)}
-                  aria-label="그룹 관리"
-                  className="relative inline-flex items-center justify-center rounded-md p-1.5 text-[#52525b] transition hover:bg-black/[0.05] hover:text-[#18181b]"
-                >
-                  <Users className="h-4 w-4" />
-                  {groups.length > 0 && (
-                    <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-[#0f4c81]" aria-hidden="true" />
-                  )}
-                </button>
-              </ToolbarTip>
-
               <ToolbarTip label="제보 · 오류 및 개선사항 전달" align="left" className="hidden sm:inline-flex">
                 <button
                   type="button"
@@ -1411,6 +1409,7 @@ export function App() {
             doubleVerify={doubleVerify}
             selectedDocCount={selectedDocIds.length}
             totalDocCount={allShelfDocs.length}
+            citationDisplayMode={citationDisplayMode}
             busy={busy}
             onModeChange={(m) => {
               setMode(m);
@@ -1623,6 +1622,8 @@ export function App() {
             onOfflineSynced={setOfflineSyncedAt}
             disableFormsPanel={disableFormsPanel}
             onDisableFormsPanelChange={handleDisableFormsPanel}
+            citationDisplayMode={citationDisplayMode}
+            onCitationDisplayModeChange={handleCitationDisplayMode}
             themeMode={themeMode}
             onThemeModeChange={handleThemeModeChange}
             onNotebooksChanged={(sel) => void loadNotebooks(sel, false)}

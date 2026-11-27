@@ -195,10 +195,11 @@ export const PageViewerModal: React.FC<Props> = ({
       onClick={onClose}
     >
       <div
-        className="flex max-h-[92dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
+        data-modal="page-viewer"
+        className="flex h-[min(90dvh,800px)] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.07] px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.07] px-4 py-3">
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-sm font-semibold text-[#18181b]">{meta?.doc_title || '원본 페이지 보기'}</h3>
             <p className="text-[11px] text-[#71717a]">

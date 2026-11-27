@@ -217,11 +217,12 @@ export const GroupsModal: React.FC<Props> = ({
       onClick={onClose}
     >
       <div
-        className="flex max-h-[90dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
+        data-modal="groups"
+        className="flex h-[min(86dvh,720px)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
           <div className="flex items-center gap-2.5">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#18181b] text-white">
               <Users className="h-4 w-4" />
@@ -245,7 +246,7 @@ export const GroupsModal: React.FC<Props> = ({
         </div>
 
         {/* Sub-tabs */}
-        <div className="flex gap-1 overflow-x-auto border-b border-black/[0.07] bg-[#f7f7f5] px-4 pt-2">
+        <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-black/[0.07] bg-[#f7f7f5] px-4 pt-2">
           <button
             type="button"
             onClick={() => setTab('groups')}
@@ -281,7 +282,7 @@ export const GroupsModal: React.FC<Props> = ({
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="settings-scroll flex-1 overflow-y-auto p-5">
           {msg && (
             <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs font-medium text-emerald-900">
               {msg}

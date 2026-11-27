@@ -80,10 +80,11 @@ export const CommandPaletteModal: React.FC<Props> = ({
       onClick={onClose}
     >
       <div
-        className="flex max-h-[75dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-black/[0.1] bg-white shadow-2xl"
+        data-modal="command-palette"
+        className="flex h-[min(74dvh,560px)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-black/[0.1] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2.5 border-b border-black/[0.08] px-4 py-3">
+        <div className="flex shrink-0 items-center gap-2.5 border-b border-black/[0.08] px-4 py-3">
           <Search className="h-4 w-4 shrink-0 text-[#0f4c81]" />
           <input
             ref={inputRef}
@@ -108,7 +109,7 @@ export const CommandPaletteModal: React.FC<Props> = ({
         </div>
 
         {/* Quick Actions Bar */}
-        <div className="flex flex-wrap items-center gap-1.5 border-b border-black/[0.06] bg-[#fafaf9] px-4 py-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-black/[0.06] bg-[#fafaf9] px-4 py-2">
           <button
             type="button"
             onClick={() => {
@@ -156,7 +157,7 @@ export const CommandPaletteModal: React.FC<Props> = ({
         </div>
 
         {/* Results */}
-        <div className="flex-1 space-y-4 overflow-y-auto p-4">
+        <div className="settings-scroll flex-1 space-y-4 overflow-y-auto p-4">
           {!res ? (
             <div className="py-8 text-center text-xs text-[#8a8a8e]">검색 준비 중...</div>
           ) : !hasAny ? (

@@ -93,11 +93,12 @@ export const StdConfigModal: React.FC<Props> = ({ config, onSaved, onClose }) =>
       onClick={onClose}
     >
       <div
-        className="flex max-h-[92dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
+        data-modal="std-config"
+        className="flex h-[min(88dvh,740px)] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
           <div>
             <h3 className="text-sm font-semibold text-[#18181b]">
               목포사랑의교회 표준화실 규격 · 결재선 · PDF 표지 맞춤 설정
@@ -117,7 +118,7 @@ export const StdConfigModal: React.FC<Props> = ({ config, onSaved, onClose }) =>
         </div>
 
         {/* Sub-Tabs */}
-        <div className="flex gap-1 overflow-x-auto border-b border-black/[0.07] bg-[#f7f7f5] px-4 pt-2">
+        <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-black/[0.07] bg-[#f7f7f5] px-4 pt-2">
           <button
             type="button"
             onClick={() => setTab('categories')}
@@ -151,7 +152,7 @@ export const StdConfigModal: React.FC<Props> = ({ config, onSaved, onClose }) =>
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="settings-scroll flex-1 overflow-y-auto p-5">
           {err && (
             <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3.5 py-2 text-xs text-red-700">
               {err}

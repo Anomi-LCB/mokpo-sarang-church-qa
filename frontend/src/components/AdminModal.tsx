@@ -3,8 +3,10 @@ import {
   AlertCircle,
   ArrowUpCircle,
   Bug,
+  CalendarDays,
   Check,
   CheckCircle2,
+  ChevronDown,
   Copy,
   Cpu,
   Database,
@@ -42,7 +44,12 @@ import {
 } from 'lucide-react';
 import { api, authHeaders, triggerTicketDownload } from '../api';
 import { cacheFormPdfBlob, countCachedFormPdfs, saveOfflineBundle } from '../offlineStore';
-import { loadUserProfile, saveUserProfile, type UserProfile } from '../profileStore';
+import {
+  createYearlyDepartmentEntry,
+  loadUserProfile,
+  saveUserProfile,
+  type UserProfile,
+} from '../profileStore';
 import type { ThemeMode } from '../themeStore';
 import type {
   AiConnectionMode,
@@ -110,6 +117,8 @@ interface Props {
   onOfflineSynced?: (syncedAt: string) => void;
   disableFormsPanel: boolean;
   onDisableFormsPanelChange: (disabled: boolean) => void;
+  citationDisplayMode?: 'inline' | 'popup';
+  onCitationDisplayModeChange?: (mode: 'inline' | 'popup') => void;
   themeMode: ThemeMode;
   onThemeModeChange: (mode: ThemeMode) => void;
   onNotebooksChanged: (selectId?: string) => void;
@@ -127,6 +136,8 @@ export const AdminModal: React.FC<Props> = ({
   onOfflineSynced,
   disableFormsPanel,
   onDisableFormsPanelChange,
+  citationDisplayMode = 'inline',
+  onCitationDisplayModeChange,
   themeMode,
   onThemeModeChange,
   onNotebooksChanged,
@@ -1413,6 +1424,16 @@ export const AdminModal: React.FC<Props> = ({
                     />
                   </div>
                   <div>
+                    <label className="mb-1 block text-[11px] font-medium text-[#52525b]">입사년월일</label>
+                    <input
+                      type="text"
+                      value={userProfile.hireDate}
+                      onChange={(e) => setUserProfile({ ...userProfile, hireDate: e.target.value })}
+                      placeholder="예: 2021-03-01"
+                      className="w-full rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs"
+                    />
+                  </div>
+                  <div>
                     <label className="mb-1 block text-[11px] font-medium text-[#52525b]">연락처</label>
                     <input
                       type="text"
@@ -1432,6 +1453,16 @@ export const AdminModal: React.FC<Props> = ({
                       className="w-full rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs"
                     />
                   </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-[#52525b]">기본 수신처</label>
+                    <input
+                      type="text"
+                      value={userProfile.recipient}
+                      onChange={(e) => setUserProfile({ ...userProfile, recipient: e.target.value })}
+                      placeholder="목포사랑의교회 당회장 귀하"
+                      className="w-full rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs"
+                    />
+                  </div>
                   <div className="sm:col-span-2">
                     <label className="mb-1 block text-[11px] font-medium text-[#52525b]">주소 (선택)</label>
                     <input
@@ -1442,16 +1473,140 @@ export const AdminModal: React.FC<Props> = ({
                       className="w-full rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs"
                     />
                   </div>
-                  <div className="sm:col-span-2">
-                    <label className="mb-1 block text-[11px] font-medium text-[#52525b]">기본 수신처</label>
-                    <input
-                      type="text"
-                      value={userProfile.recipient}
-                      onChange={(e) => setUserProfile({ ...userProfile, recipient: e.target.value })}
-                      placeholder="목포사랑의교회 당회장 귀하"
-                      className="w-full rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-xs"
-                    />
+                </div>
+
+                {/* Yearly Department History (Checkable per year, editable & addable) */}
+                <div className="space-y-2 border-t border-black/[0.06] pt-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <CalendarDays className="h-3.5 w-3.5 text-[#0f4c81]" />
+                      <span className="text-[11.5px] font-semibold text-[#18181b]">
+                        연도별 담당 부서 (매년 체크 · 변경 · 추가)
+                      </span>
+                      {userProfile.yearlyDepartments.length > 0 && (
+                        <span className="chip-nowrap rounded-full bg-[#0f4c81]/10 px-2 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                          체크 {userProfile.yearlyDepartments.filter((y) => y.checked).length}건
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const curYear = new Date().getFullYear();
+                        const numericYears = userProfile.yearlyDepartments
+                          .map((y) => parseInt(y.year, 10))
+                          .filter((n) => !Number.isNaN(n));
+                        const nextYear =
+                          numericYears.length === 0 ? String(curYear) : String(Math.min(...numericYears) - 1);
+                        setUserProfile({
+                          ...userProfile,
+                          yearlyDepartments: [
+                            ...userProfile.yearlyDepartments,
+                            createYearlyDepartmentEntry(nextYear),
+                          ],
+                        });
+                      }}
+                      className="chip-nowrap inline-flex items-center gap-1 rounded-md border border-[#0f4c81]/25 bg-white px-2.5 py-1 text-[11px] font-semibold text-[#0f4c81] hover:bg-[#0f4c81]/[0.06]"
+                    >
+                      <Plus className="h-3 w-3" />
+                      <span>연도 추가</span>
+                    </button>
                   </div>
+
+                  {userProfile.yearlyDepartments.length === 0 ? (
+                    <p className="rounded-lg border border-dashed border-black/[0.1] bg-white px-3 py-2.5 text-[11px] text-[#71717a]">
+                      매년 맡은 부서를 연도별로 추가하고 체크해 두면 사역 이력과 서식 작성에 자동 반영됩니다. (예: 2026년 청년부, 2025년 행정실)
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {userProfile.yearlyDepartments.map((entry) => (
+                        <div
+                          key={entry.id}
+                          className={`flex flex-wrap items-center gap-1.5 rounded-lg border px-2.5 py-1.5 transition sm:flex-nowrap ${
+                            entry.checked
+                              ? 'border-[#0f4c81]/25 bg-white'
+                              : 'border-black/[0.06] bg-[#f4f4f2] opacity-70'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={entry.checked}
+                            aria-label={`${entry.year || '연도'} 담당 부서 포함 체크`}
+                            title="체크 시 서식 자동 기입과 이력 요약에 포함됩니다"
+                            onChange={(e) =>
+                              setUserProfile({
+                                ...userProfile,
+                                yearlyDepartments: userProfile.yearlyDepartments.map((item) =>
+                                  item.id === entry.id ? { ...item, checked: e.target.checked } : item
+                                ),
+                              })
+                            }
+                            className="h-3.5 w-3.5 shrink-0 accent-[#0f4c81]"
+                          />
+                          <input
+                            type="text"
+                            value={entry.year}
+                            onChange={(e) =>
+                              setUserProfile({
+                                ...userProfile,
+                                yearlyDepartments: userProfile.yearlyDepartments.map((item) =>
+                                  item.id === entry.id ? { ...item, year: e.target.value } : item
+                                ),
+                              })
+                            }
+                            placeholder="연도 (2026)"
+                            aria-label="담당 연도"
+                            className="w-20 shrink-0 rounded-md border border-black/[0.1] bg-white px-2 py-1.5 text-xs font-semibold"
+                          />
+                          <input
+                            type="text"
+                            value={entry.department}
+                            onChange={(e) =>
+                              setUserProfile({
+                                ...userProfile,
+                                yearlyDepartments: userProfile.yearlyDepartments.map((item) =>
+                                  item.id === entry.id ? { ...item, department: e.target.value } : item
+                                ),
+                              })
+                            }
+                            placeholder="맡은 부서 (예: 청년부, 행정실, 1교구)"
+                            aria-label="연도별 담당 부서"
+                            className="min-w-0 flex-1 rounded-md border border-black/[0.1] bg-white px-2.5 py-1.5 text-xs"
+                          />
+                          <input
+                            type="text"
+                            value={entry.role || ''}
+                            onChange={(e) =>
+                              setUserProfile({
+                                ...userProfile,
+                                yearlyDepartments: userProfile.yearlyDepartments.map((item) =>
+                                  item.id === entry.id ? { ...item, role: e.target.value } : item
+                                ),
+                              })
+                            }
+                            placeholder="역할 (선택)"
+                            aria-label="연도별 역할"
+                            className="w-24 shrink-0 rounded-md border border-black/[0.1] bg-white px-2 py-1.5 text-xs sm:w-28"
+                          />
+                          <button
+                            type="button"
+                            aria-label="연도별 부서 삭제"
+                            onClick={() =>
+                              setUserProfile({
+                                ...userProfile,
+                                yearlyDepartments: userProfile.yearlyDepartments.filter(
+                                  (item) => item.id !== entry.id
+                                ),
+                              })
+                            }
+                            className="rounded p-1 text-[#a1a1aa] hover:bg-red-50 hover:text-red-600"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Custom extra profile fields */}
@@ -1796,6 +1951,37 @@ export const AdminModal: React.FC<Props> = ({
                         onClick={() => onThemeModeChange(id)}
                         className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
                           themeMode === id
+                            ? 'bg-white text-[#18181b] shadow-2xs'
+                            : 'text-[#71717a] hover:text-[#18181b]'
+                        }`}
+                      >
+                        <Icon className="h-3 w-3" />
+                        <span>{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-black/[0.06] pb-3">
+                  <div>
+                    <p className="text-xs font-semibold text-[#18181b]">근거 원문 표시 방식</p>
+                    <p className="text-[11px] text-[#71717a]">
+                      답변의 근거 원문 버튼을 눌렀을 때 하단에서 열고 닫거나, 별도 팝업창으로 크게 볼 수 있습니다
+                    </p>
+                  </div>
+                  <div className="inline-flex rounded-lg bg-[#f0f0ee] p-0.5">
+                    {(
+                      [
+                        { id: 'inline', label: '하단 열기·닫기', Icon: ChevronDown },
+                        { id: 'popup', label: '팝업창으로 보기', Icon: ExternalLink },
+                      ] as const
+                    ).map(({ id, label, Icon }) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => onCitationDisplayModeChange?.(id)}
+                        className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                          citationDisplayMode === id
                             ? 'bg-white text-[#18181b] shadow-2xs'
                             : 'text-[#71717a] hover:text-[#18181b]'
                         }`}

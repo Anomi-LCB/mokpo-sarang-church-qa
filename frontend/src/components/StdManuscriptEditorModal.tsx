@@ -104,11 +104,12 @@ export const StdManuscriptEditorModal: React.FC<EditorProps> = ({
       onClick={onClose}
     >
       <div
-        className="flex h-[88dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
+        data-modal="std-manuscript-editor"
+        className="flex h-[min(88dvh,780px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
           <div className="min-w-0">
             <h3 className="text-sm font-semibold text-[#18181b]">
               출판 전 원고 초안 검토 · 직접 편집
@@ -442,10 +443,11 @@ export const StdDiffModal: React.FC<DiffModalProps> = ({ title, diffReport, onCl
       onClick={onClose}
     >
       <div
-        className="flex max-h-[88dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
+        data-modal="std-diff"
+        className="flex h-[min(86dvh,760px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <FileDiff className="h-4 w-4 shrink-0 text-[#0f4c81]" />
@@ -467,7 +469,7 @@ export const StdDiffModal: React.FC<DiffModalProps> = ({ title, diffReport, onCl
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-5">
+        <div className="settings-scroll flex-1 overflow-y-auto p-5">
           {rows.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-black/[0.12] p-10 text-center text-xs text-[#71717a]">
               <CheckCircle2 className="h-6 w-6 text-emerald-600" />

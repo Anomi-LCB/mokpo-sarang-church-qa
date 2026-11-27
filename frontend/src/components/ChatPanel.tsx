@@ -10,6 +10,7 @@ import {
   ChevronUp,
   Copy,
   Download,
+  ExternalLink,
   Eye,
   FileDown,
   FileEdit,
@@ -21,6 +22,7 @@ import {
   Scale,
   ShieldCheck,
   Users,
+  X,
   Zap,
 } from 'lucide-react';
 import { api, triggerTicketDownload } from '../api';
@@ -36,6 +38,7 @@ interface Props {
   doubleVerify: boolean;
   selectedDocCount: number;
   totalDocCount: number;
+  citationDisplayMode?: 'inline' | 'popup';
   busy: boolean;
   onModeChange: (m: AnswerMode) => void;
   onInstantToggle: (v: boolean) => void;
@@ -168,6 +171,7 @@ export const ChatPanel: React.FC<Props> = memo(({
   doubleVerify,
   selectedDocCount,
   totalDocCount,
+  citationDisplayMode = 'inline',
   busy,
   onModeChange,
   onInstantToggle,
@@ -177,9 +181,19 @@ export const ChatPanel: React.FC<Props> = memo(({
   onOpenAutofill,
 }) => {
   const [openCites, setOpenCites] = useState<Record<string, boolean>>({});
+  const [popupCitesMsg, setPopupCitesMsg] = useState<ChatMessage | null>(null);
   const [copiedId, setCopiedId] = useState<string>('');
   const [exportingId, setExportingId] = useState<string>('');
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!popupCitesMsg) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPopupCitesMsg(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [popupCitesMsg]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -188,8 +202,12 @@ export const ChatPanel: React.FC<Props> = memo(({
     }
   }, [messages]);
 
-  const toggleCites = (msgId: string) => {
-    setOpenCites((prev) => ({ ...prev, [msgId]: !prev[msgId] }));
+  const handleCitationButtonClick = (msg: ChatMessage) => {
+    if (citationDisplayMode === 'popup') {
+      setPopupCitesMsg(msg);
+    } else {
+      setOpenCites((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }));
+    }
   };
 
   const copyMessage = (msgId: string, content: string) => {
@@ -427,12 +445,14 @@ export const ChatPanel: React.FC<Props> = memo(({
                             {msg.citations.length > 0 && (
                               <button
                                 type="button"
-                                onClick={() => toggleCites(msg.id)}
+                                onClick={() => handleCitationButtonClick(msg)}
                                 className="chip-nowrap inline-flex items-center gap-1.5 rounded-md bg-[#f7f7f5] px-2.5 py-1 text-[11.5px] font-semibold text-[#18181b] ring-1 ring-black/[0.07] transition hover:bg-[#ededeb]"
                               >
                                 <BookOpen className="h-3.5 w-3.5 text-[#0f4c81]" />
                                 <span>근거 원문 {msg.citations.length}건</span>
-                                {openCites[msg.id] ? (
+                                {citationDisplayMode === 'popup' ? (
+                                  <ExternalLink className="h-3 w-3 text-[#71717a]" />
+                                ) : openCites[msg.id] ? (
                                   <ChevronUp className="h-3.5 w-3.5 text-[#71717a]" />
                                 ) : (
                                   <ChevronDown className="h-3.5 w-3.5 text-[#71717a]" />
@@ -515,8 +535,8 @@ export const ChatPanel: React.FC<Props> = memo(({
                       )}
                     </div>
 
-                    {/* Collapsible Citations */}
-                    {openCites[msg.id] && msg.citations.length > 0 && (
+                    {/* Collapsible Citations (Inline mode) */}
+                    {citationDisplayMode === 'inline' && openCites[msg.id] && msg.citations.length > 0 && (
                       <div className="space-y-2 rounded-xl border border-black/[0.07] bg-[#fafaf9] p-3">
                         {msg.citations.map((c: Citation, idx: number) => (
                           <div key={`${c.chunk_id}-${idx}`} className="rounded-lg border border-black/[0.06] bg-white p-3">
@@ -633,6 +653,89 @@ export const ChatPanel: React.FC<Props> = memo(({
         onDoubleVerifyToggle={onDoubleVerifyToggle}
         onSend={onSend}
       />
+
+      {/* Evidence Citations Popup Modal (when '팝업창으로 보기' is selected in Settings) */}
+      {popupCitesMsg && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-3 backdrop-blur-xs sm:p-5"
+          onClick={() => setPopupCitesMsg(null)}
+        >
+          <div
+            data-modal="citations-popup"
+            className="flex h-[min(84dvh,680px)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-black/[0.09] bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#0f4c81] text-white">
+                  <BookOpen className="h-3.5 w-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="truncate text-sm font-semibold text-[#18181b]">
+                    근거 원문 보기 ({popupCitesMsg.citations.length}건)
+                  </h3>
+                  <p className="truncate text-[11px] text-[#71717a]">
+                    쪽수 버튼을 누르면 해당 원문 페이지가 하이라이트와 함께 열립니다
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPopupCitesMsg(null)}
+                aria-label="닫기"
+                className="rounded-lg p-1.5 text-[#71717a] hover:bg-black/[0.06] hover:text-[#18181b]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="settings-scroll flex-1 space-y-2.5 overflow-y-auto p-5">
+              {popupCitesMsg.citations.map((c: Citation, idx: number) => (
+                <div
+                  key={`pop-${c.chunk_id}-${idx}`}
+                  className="rounded-xl border border-black/[0.07] bg-[#fafaf9] p-3.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="chip-nowrap rounded bg-[#0f4c81]/10 px-1.5 py-0.5 text-[10px] font-bold text-[#0f4c81]">
+                          근거 {idx + 1}
+                        </span>
+                        <span className="text-xs font-semibold text-[#18181b]">{c.doc_title}</span>
+                        {c.via_xref && (
+                          <span className="chip-nowrap inline-flex items-center gap-0.5 rounded bg-[#0f4c81]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#0f4c81]">
+                            <Link2 className="h-2.5 w-2.5" />
+                            <span>{c.via_xref}</span>
+                          </span>
+                        )}
+                      </div>
+                      {(c.section_path || c.heading) && (
+                        <p className="mt-0.5 truncate text-[11px] text-[#71717a]">
+                          {[c.section_path, c.heading].filter(Boolean).join(' · ')}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPopupCitesMsg(null);
+                        onOpenViewer(c.doc_id, c.page_start, c.excerpt);
+                      }}
+                      className="chip-nowrap inline-flex shrink-0 items-center gap-1 rounded-md bg-white px-2.5 py-1 text-[11px] font-semibold text-[#0f4c81] ring-1 ring-black/[0.08] transition hover:bg-[#ededeb]"
+                    >
+                      <Eye className="h-3 w-3" />
+                      <span>p.{c.page_start}</span>
+                    </button>
+                  </div>
+                  <p className="mt-2.5 whitespace-pre-line rounded-lg border border-black/[0.05] bg-white p-3 text-xs leading-relaxed text-[#27272a]">
+                    {c.excerpt}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 });

@@ -266,12 +266,12 @@ def main() -> None:
             tip_opacity = auto_btn.locator('xpath=following-sibling::*[@role="tooltip"]').evaluate("el => parseFloat(getComputedStyle(el).opacity)")
             assert tip_opacity > 0.9, f"Expected mode hover tooltip opacity > 0.9, got {tip_opacity}"
 
-            # Also verify new v4.1 universal icon hover tooltip on top header!
-            grp_btn = dpage.locator('header button[aria-label="그룹 관리"]').first
-            grp_btn.hover()
+            # Verify universal icon hover tooltip on top header (using 제보 icon since 그룹 moved solely to sidebar beside 대화)!
+            rpt_btn = dpage.locator('header button[aria-label="버그 및 개선사항 제보"]').first
+            rpt_btn.hover()
             dpage.wait_for_timeout(200)
-            grp_tip_op = grp_btn.locator('xpath=following-sibling::*[@role="tooltip"]').evaluate("el => parseFloat(getComputedStyle(el).opacity)")
-            assert grp_tip_op > 0.9, f"Expected icon hover tooltip opacity > 0.9, got {grp_tip_op}"
+            rpt_tip_op = rpt_btn.locator('xpath=following-sibling::*[@role="tooltip"]').evaluate("el => parseFloat(getComputedStyle(el).opacity)")
+            assert rpt_tip_op > 0.9, f"Expected icon hover tooltip opacity > 0.9, got {rpt_tip_op}"
             dpage.mouse.move(720, 450)
             dpage.wait_for_timeout(150)
 
@@ -320,7 +320,7 @@ def main() -> None:
             dpage.click('aside[data-panel="sidebar"] button[aria-label="자료 공간 펼치기"]')
             dpage.wait_for_timeout(180)
 
-            # Verify v4.2.3 Top Header: ONLY '행정 Q&A', '표준화실', and 4 answer mode tabs have text; ALL other icons are icon-only with hover tooltip!
+            # Verify v4.2.5 Top Header: ONLY '행정 Q&A', '표준화실', and 4 mode tabs have text; '그룹' removed from top bar (lives next to '대화' in sidebar)!
             hdr_check = dpage.evaluate(
                 """() => {
                     const hdr = document.querySelector('header');
@@ -339,7 +339,7 @@ def main() -> None:
                         .map(b => ({ label: b.getAttribute('aria-label') || '', text: (b.innerText || '').trim() }));
                     return {
                         stdRight: stdBtn ? Math.round(stdBtn.getBoundingClientRect().right) : -1,
-                        grpLeft: grpBtn ? Math.round(grpBtn.getBoundingClientRect().left) : -1,
+                        hasHeaderGroup: Boolean(grpBtn),
                         rptLeft: rptBtn ? Math.round(rptBtn.getBoundingClientRect().left) : -1,
                         hasTopNewChat: Boolean(newChatBtn),
                         strayTextButtons,
@@ -348,23 +348,39 @@ def main() -> None:
             )
             print(f"[AUDIT TopHeader-Layout] {hdr_check}", flush=True)
             assert hdr_check["hasTopNewChat"] is False, "Top bar should not have '새 대화' button!"
+            assert hdr_check["hasHeaderGroup"] is False, "Top bar should not have duplicate '그룹' button!"
             assert len(hdr_check["strayTextButtons"]) == 0, f"Top bar icon buttons must have zero visible text: {hdr_check['strayTextButtons']}"
-            assert 0 < hdr_check["grpLeft"] < 650 and hdr_check["grpLeft"] >= hdr_check["stdRight"] - 4, f"Group button not right of 표준화실: {hdr_check}"
-            assert hdr_check["rptLeft"] > hdr_check["grpLeft"] and hdr_check["rptLeft"] < 700, f"Report button not next to 그룹: {hdr_check}"
+            assert 0 < hdr_check["rptLeft"] < 650 and hdr_check["rptLeft"] >= hdr_check["stdRight"] - 4, f"Report button not right of 표준화실: {hdr_check}"
 
-            # Open v3.0 Document Library (서고) Modal & audit
+            # Open v3.0 Document Library (서고) Modal & audit uniform fixed height across categories
             dpage.click('aside[data-panel="sidebar"] button:has-text("자료 라이브러리")')
             dpage.wait_for_selector("text=전체 자료 라이브러리", timeout=6000)
             dpage.wait_for_timeout(200)
+            lib_h1 = dpage.locator('div[data-modal="library"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            dpage.locator('div[data-modal="library"] button:has-text("교단 헌법")').first.click()
+            dpage.wait_for_timeout(150)
+            lib_h2 = dpage.locator('div[data-modal="library"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            assert abs(lib_h1 - lib_h2) <= 2, f"Library modal height changed across filter tabs: {lib_h1} vs {lib_h2}"
             audit_geometry(dpage, "Desktop-1440x900-LibraryModal")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_library.png"))
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
             dpage.wait_for_timeout(150)
 
-            # Open v3.0 Collaboration Groups & Permissions Modal & audit
-            dpage.click('header button[aria-label="그룹 관리"]')
+            # Open Groups Modal from left sidebar beside '대화' & verify uniform fixed height across ALL 3 tabs!
+            dpage.click('aside[data-panel="sidebar"] button:has-text("그룹")')
             dpage.wait_for_selector("text=그룹 · 초대 협업 관리", timeout=6000)
             dpage.wait_for_timeout(200)
+            grp_h1 = dpage.locator('div[data-modal="groups"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            dpage.click('div[data-modal="groups"] button:has-text("그룹 개설 권한 관리")')
+            dpage.wait_for_timeout(180)
+            grp_h2 = dpage.locator('div[data-modal="groups"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            dpage.click('div[data-modal="groups"] button:has-text("기기 간 내 그룹 연결")')
+            dpage.wait_for_timeout(180)
+            grp_h3 = dpage.locator('div[data-modal="groups"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            print(f"[AUDIT GroupsModal-UniformHeight] h1={grp_h1} h2={grp_h2} h3={grp_h3}", flush=True)
+            assert abs(grp_h1 - grp_h2) <= 2 and abs(grp_h1 - grp_h3) <= 2, f"GroupsModal height varied across tabs: {grp_h1}/{grp_h2}/{grp_h3}"
+            dpage.click('div[data-modal="groups"] button:has-text("내 그룹 · 초대")')
+            dpage.wait_for_timeout(150)
             audit_geometry(dpage, "Desktop-1440x900-GroupsModal")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_groups.png"))
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
@@ -429,15 +445,31 @@ def main() -> None:
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
             dpage.wait_for_timeout(200)
 
-            # Open Settings -> Verify uniform modal height across tabs + zero tab bar clipping + plain Korean labels!
+            # Open Settings -> Verify uniform modal height + hireDate & yearly departments + citation display option!
             dpage.click('header button[aria-label="환경 설정"]')
             dpage.wait_for_selector("text=화면 · AI 엔진", timeout=8000)
             dpage.click('div[data-modal="settings"] button:has-text("내 기본 정보")')
             dpage.wait_for_selector("text=서식 자동 작성용 내 기본 정보", timeout=6000)
+            dpage.wait_for_selector("text=입사년월일", timeout=5000)
+            dpage.wait_for_selector("text=연도별 담당 부서", timeout=5000)
+            dpage.fill('div[data-modal="settings"] input[placeholder*="2021-03-01"]', "2022-03-01")
+            dpage.click('div[data-modal="settings"] button:has-text("연도 추가")')
+            dpage.wait_for_selector('div[data-modal="settings"] input[aria-label="연도별 담당 부서"]', timeout=5000)
+            dpage.fill('div[data-modal="settings"] input[aria-label="연도별 담당 부서"]', "청년부")
             dpage.wait_for_timeout(180)
             profile_modal_h = dpage.locator('div[data-modal="settings"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_profile.png"))
 
             dpage.click('div[data-modal="settings"] button:has-text("화면 · AI 엔진")')
+            dpage.wait_for_selector("text=근거 원문 표시 방식", timeout=6000)
+            dpage.wait_for_selector("text=하단 열기·닫기", timeout=5000)
+            dpage.wait_for_selector("text=팝업창으로 보기", timeout=5000)
+            dpage.click('div[data-modal="settings"] button:has-text("팝업창으로 보기")')
+            dpage.wait_for_timeout(120)
+            assert dpage.evaluate("() => localStorage.getItem('church_search_citation_mode')") == "popup"
+            dpage.click('div[data-modal="settings"] button:has-text("하단 열기·닫기")')
+            dpage.wait_for_timeout(120)
+            assert dpage.evaluate("() => localStorage.getItem('church_search_citation_mode')") == "inline"
             dpage.wait_for_selector("text=AI 연결 방식 선택", timeout=6000)
             dpage.wait_for_selector("text=스마트 검색 엔진", timeout=6000)
             dpage.wait_for_selector("text=한글 정밀 분석 켜짐", timeout=6000)
@@ -467,7 +499,7 @@ def main() -> None:
                 }"""
             )
             print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.2.4", f"Expected v4.2.4, got {eng_status}"
+            assert eng_status.get("version") == "4.2.5", f"Expected v4.2.5, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")
@@ -553,17 +585,22 @@ def main() -> None:
             dpage.click('button[title="게시글 삭제"]')
             dpage.wait_for_timeout(350)
 
-            # Open Church Taxonomy & Approval Line Customization Modal in Standardization Studio
+            # Open Church Taxonomy & Approval Line Customization Modal & verify uniform fixed height across all 3 tabs!
             dpage.click('aside button[aria-label="표준화실 규격 및 결재선 설정"]')
             dpage.wait_for_selector("text=목포사랑의교회 표준화실 규격", timeout=5000)
+            std_cfg_h1 = dpage.locator('div[data-modal="std-config"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
             dpage.click('div.fixed.inset-0.z-50 button:has-text("교회 결재선 양식")')
             dpage.wait_for_selector("text=PDF·Word 결재란 미리보기", timeout=5000)
             dpage.wait_for_timeout(200)
+            std_cfg_h2 = dpage.locator('div[data-modal="std-config"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
             audit_geometry(dpage, "Desktop-1440x900-StdConfigApprovals")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_config.png"))
             dpage.click('div.fixed.inset-0.z-50 button:has-text("PDF 표지 · 서식 양식")')
             dpage.wait_for_selector("text=표지 최상단 교단·문서 표기", timeout=5000)
             dpage.wait_for_timeout(200)
+            std_cfg_h3 = dpage.locator('div[data-modal="std-config"]').evaluate("el => Math.round(el.getBoundingClientRect().height)")
+            print(f"[AUDIT StdConfigModal-UniformHeight] h1={std_cfg_h1} h2={std_cfg_h2} h3={std_cfg_h3}", flush=True)
+            assert abs(std_cfg_h1 - std_cfg_h2) <= 2 and abs(std_cfg_h1 - std_cfg_h3) <= 2, f"StdConfigModal height varied across tabs: {std_cfg_h1}/{std_cfg_h2}/{std_cfg_h3}"
             audit_geometry(dpage, "Desktop-1440x900-StdConfigCover")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_cover.png"))
             d_ctx.close()

@@ -63,10 +63,11 @@ export const StdProposalCompareModal: React.FC<Props> = ({ proposal, onClose }) 
       onClick={onClose}
     >
       <div
-        className="flex max-h-[90dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
+        data-modal="std-compare"
+        className="flex h-[min(86dvh,760px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <Columns2 className="h-4 w-4 shrink-0 text-[#0f4c81]" />

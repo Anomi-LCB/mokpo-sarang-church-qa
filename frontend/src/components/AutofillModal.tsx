@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { api, safeAssetUrl, triggerTicketDownload } from '../api';
 import {
+  createYearlyDepartmentEntry,
   hasSavedProfile,
   loadUserProfile,
   matchProfileToFieldLabel,
@@ -246,11 +247,12 @@ export const AutofillModal: React.FC<Props> = ({ form, onClose }) => {
       onClick={onClose}
     >
       <div
-        className="flex max-h-[94dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-[#fafaf9] shadow-2xl"
+        data-modal="autofill"
+        className="flex h-[min(92dvh,820px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-[#fafaf9] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Studio Header */}
-        <div className="flex items-center justify-between gap-3 border-b border-black/[0.07] bg-white px-4 py-3 sm:px-5">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-black/[0.07] bg-white px-4 py-3 sm:px-5">
           <div className="flex min-w-0 items-center gap-2.5">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#18181b] text-white">
               <FileEdit className="h-4 w-4" />
@@ -309,8 +311,10 @@ export const AutofillModal: React.FC<Props> = ({ form, onClose }) => {
               {!showProfileEditor && (
                 <p className="mt-1.5 truncate text-[11.5px] text-[#71717a]">
                   {profileConfigured
-                    ? [profile.name, profile.position, profile.department, profile.phone].filter(Boolean).join(' · ')
-                    : '성명·직분·부서·연락처를 1회 등록해 두면 이 기기에서만 보관되며 모든 서식에 즉시 자동 기입됩니다.'}
+                    ? [profile.name, profile.position, profile.department, profile.hireDate ? `입사 ${profile.hireDate}` : '', profile.phone]
+                        .filter(Boolean)
+                        .join(' · ')
+                    : '성명·직분·부서·입사일·연락처를 1회 등록해 두면 이 기기에서만 보관되며 모든 서식에 즉시 자동 기입됩니다.'}
                 </p>
               )}
 
@@ -347,6 +351,13 @@ export const AutofillModal: React.FC<Props> = ({ form, onClose }) => {
                     />
                     <input
                       type="text"
+                      value={profile.hireDate}
+                      onChange={(e) => setProfile({ ...profile, hireDate: e.target.value })}
+                      placeholder="입사년월일 (2021-03-01)"
+                      className="rounded-lg border border-black/[0.1] bg-white px-2.5 py-1.5 text-[16px] text-[#18181b] outline-none focus:border-[#0f4c81] lg:text-xs"
+                    />
+                    <input
+                      type="text"
                       value={profile.phone}
                       onChange={(e) => setProfile({ ...profile, phone: e.target.value })}
                       placeholder="연락처 (010-0000-0000)"
@@ -357,8 +368,88 @@ export const AutofillModal: React.FC<Props> = ({ form, onClose }) => {
                       value={profile.email}
                       onChange={(e) => setProfile({ ...profile, email: e.target.value })}
                       placeholder="이메일 (선택)"
-                      className="rounded-lg border border-black/[0.1] bg-white px-2.5 py-1.5 text-[16px] text-[#18181b] outline-none focus:border-[#0f4c81] lg:text-xs"
+                      className="col-span-2 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1.5 text-[16px] text-[#18181b] outline-none focus:border-[#0f4c81] lg:text-xs"
                     />
+                  </div>
+                  <div className="space-y-1.5 rounded-lg border border-black/[0.06] bg-white p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-[#52525b]">연도별 담당 부서</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const curYear = new Date().getFullYear();
+                          const nums = profile.yearlyDepartments
+                            .map((y) => parseInt(y.year, 10))
+                            .filter((n) => !Number.isNaN(n));
+                          const nextYear = nums.length === 0 ? String(curYear) : String(Math.min(...nums) - 1);
+                          setProfile({
+                            ...profile,
+                            yearlyDepartments: [...profile.yearlyDepartments, createYearlyDepartmentEntry(nextYear)],
+                          });
+                        }}
+                        className="chip-nowrap inline-flex items-center gap-0.5 text-[10.5px] font-semibold text-[#0f4c81] hover:underline"
+                      >
+                        <Plus className="h-3 w-3" />
+                        <span>연도 추가</span>
+                      </button>
+                    </div>
+                    {profile.yearlyDepartments.map((entry) => (
+                      <div key={entry.id} className="flex items-center gap-1">
+                        <input
+                          type="checkbox"
+                          checked={entry.checked}
+                          onChange={(e) =>
+                            setProfile({
+                              ...profile,
+                              yearlyDepartments: profile.yearlyDepartments.map((y) =>
+                                y.id === entry.id ? { ...y, checked: e.target.checked } : y
+                              ),
+                            })
+                          }
+                          className="h-3.5 w-3.5 shrink-0 accent-[#0f4c81]"
+                        />
+                        <input
+                          type="text"
+                          value={entry.year}
+                          onChange={(e) =>
+                            setProfile({
+                              ...profile,
+                              yearlyDepartments: profile.yearlyDepartments.map((y) =>
+                                y.id === entry.id ? { ...y, year: e.target.value } : y
+                              ),
+                            })
+                          }
+                          placeholder="연도"
+                          className="w-16 shrink-0 rounded border border-black/[0.1] px-1.5 py-1 text-[11px]"
+                        />
+                        <input
+                          type="text"
+                          value={entry.department}
+                          onChange={(e) =>
+                            setProfile({
+                              ...profile,
+                              yearlyDepartments: profile.yearlyDepartments.map((y) =>
+                                y.id === entry.id ? { ...y, department: e.target.value } : y
+                              ),
+                            })
+                          }
+                          placeholder="담당 부서"
+                          className="min-w-0 flex-1 rounded border border-black/[0.1] px-2 py-1 text-[11px]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setProfile({
+                              ...profile,
+                              yearlyDepartments: profile.yearlyDepartments.filter((y) => y.id !== entry.id),
+                            })
+                          }
+                          className="rounded p-0.5 text-[#a1a1aa] hover:text-red-600"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
                   </div>
                   <input
                     type="text"

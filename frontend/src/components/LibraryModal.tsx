@@ -137,11 +137,12 @@ export const LibraryModal: React.FC<Props> = ({
       onClick={onClose}
     >
       <div
-        className="flex max-h-[90dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
+        data-modal="library"
+        className="flex h-[min(88dvh,740px)] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.08] bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-5 py-3.5">
           <div className="flex items-center gap-2.5">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#0f4c81] text-white">
               <Library className="h-4 w-4" />
@@ -192,7 +193,7 @@ export const LibraryModal: React.FC<Props> = ({
         </div>
 
         {/* Search, Category Filter & Bundle Presets */}
-        <div className="space-y-2.5 border-b border-black/[0.07] bg-white px-5 py-3">
+        <div className="shrink-0 space-y-2.5 border-b border-black/[0.07] bg-white px-5 py-3">
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative min-w-[200px] flex-1">
               <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-[#a1a1aa]" />
@@ -269,7 +270,7 @@ export const LibraryModal: React.FC<Props> = ({
         </div>
 
         {/* Document List */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+        <div className="settings-scroll flex-1 overflow-y-auto p-4 sm:p-5">
           {filtered.length === 0 ? (
             <div className="rounded-xl border border-dashed border-black/[0.12] p-12 text-center text-xs text-[#8a8a8e]">
               조건에 맞는 문서가 서고에 없습니다.
