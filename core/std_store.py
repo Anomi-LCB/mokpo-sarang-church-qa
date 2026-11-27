@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -174,27 +176,83 @@ CREATE INDEX IF NOT EXISTS idx_std_pub_board ON std_publications(board_id);
 
 class StandardizationStore:
     def __init__(self, db_path: Path | None = None):
-        self.db_path = db_path or get_db_path()
+        self.db_path = Path(db_path) if db_path else get_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._local = threading.local()
+        self._pool_lock = threading.Lock()
+        self._all_conns: set[sqlite3.Connection] = set()
         with self.connect() as conn:
             conn.executescript(STD_SCHEMA_SQL)
             bcols = {r["name"] for r in conn.execute("PRAGMA table_info(std_boards)").fetchall()}
             if "group_id" not in bcols:
                 conn.execute("ALTER TABLE std_boards ADD COLUMN group_id TEXT NOT NULL DEFAULT ''")
+            if "quorum_target" not in bcols:
+                conn.execute("ALTER TABLE std_boards ADD COLUMN quorum_target INTEGER NOT NULL DEFAULT 0")
+            scols = {r["name"] for r in conn.execute("PRAGMA table_info(std_submissions)").fetchall()}
+            if "file_hash" not in scols:
+                conn.execute("ALTER TABLE std_submissions ADD COLUMN file_hash TEXT NOT NULL DEFAULT ''")
+            if "file_size" not in scols:
+                conn.execute("ALTER TABLE std_submissions ADD COLUMN file_size INTEGER NOT NULL DEFAULT 0")
+            if "meta_json" not in scols:
+                conn.execute("ALTER TABLE std_submissions ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'")
+            pcols = {r["name"] for r in conn.execute("PRAGMA table_info(std_publications)").fetchall()}
+            if "hwpx_path" not in pcols:
+                conn.execute("ALTER TABLE std_publications ADD COLUMN hwpx_path TEXT NOT NULL DEFAULT ''")
+            if "manuscript_json" not in pcols:
+                conn.execute("ALTER TABLE std_publications ADD COLUMN manuscript_json TEXT NOT NULL DEFAULT '{}'")
+            if "diff_report_json" not in pcols:
+                conn.execute("ALTER TABLE std_publications ADD COLUMN diff_report_json TEXT NOT NULL DEFAULT '{}'")
+            if "forms_registered" not in pcols:
+                conn.execute("ALTER TABLE std_publications ADD COLUMN forms_registered INTEGER NOT NULL DEFAULT 0")
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def _open_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA temp_store = MEMORY;")
+        conn.execute("PRAGMA cache_size = -16000;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
+        return conn
+
+    def close_pooled_connections(self) -> None:
+        with self._pool_lock:
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if hasattr(self._local, "conn"):
+            self._local.conn = None
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")
+            except sqlite3.Error:
+                conn = None
+                self._local.conn = None
+        if conn is None:
+            conn = self._open_conn()
+            self._local.conn = conn
+            with self._pool_lock:
+                self._all_conns.add(conn)
         try:
             yield conn
-            conn.commit()
+            if conn.in_transaction:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except Exception:
+                pass
             raise
-        finally:
-            conn.close()
 
     # ---- Boards ----
     def create_board(
@@ -210,6 +268,7 @@ class StandardizationStore:
         allow_vote_change: bool = True,
         auto_route_enabled: bool = False,
         group_id: str = "",
+        quorum_target: int = 0,
         created_by: str = "관리자",
     ) -> dict[str, Any]:
         bid = "brd_" + uuid.uuid4().hex[:10]
@@ -221,8 +280,8 @@ class StandardizationStore:
                 INSERT INTO std_boards(
                     id, title, category, work_type, description, guidelines, status, deadline,
                     vote_visibility, submission_anonymous, allow_vote_change, auto_route_enabled,
-                    group_id, created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'collecting', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    group_id, quorum_target, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'collecting', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     bid,
@@ -237,6 +296,7 @@ class StandardizationStore:
                     int(bool(allow_vote_change)),
                     int(bool(auto_route_enabled)),
                     (group_id or "").strip()[:48],
+                    max(0, min(500, int(quorum_target or 0))),
                     created_by[:60],
                     ts,
                     ts,
@@ -320,6 +380,7 @@ class StandardizationStore:
             "allow_vote_change",
             "auto_route_enabled",
             "group_id",
+            "quorum_target",
         }
         sets: list[str] = []
         vals: list[Any] = []
@@ -328,6 +389,8 @@ class StandardizationStore:
                 continue
             if k in ("submission_anonymous", "allow_vote_change", "auto_route_enabled"):
                 v = int(bool(v))
+            elif k == "quorum_target":
+                v = max(0, min(500, int(v)))
             elif k == "status" and v not in ("collecting", "voting", "published"):
                 continue
             elif k == "vote_visibility" and v not in ("named", "anonymous"):
@@ -346,7 +409,12 @@ class StandardizationStore:
     def delete_board(self, board_id: str) -> bool:
         with self.connect() as conn:
             cur = conn.execute("DELETE FROM std_boards WHERE id = ?", (board_id,))
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+        if deleted:
+            for folder in (get_std_dir() / "uploads" / board_id, get_std_dir() / "publications" / board_id):
+                if folder.exists():
+                    shutil.rmtree(folder, ignore_errors=True)
+        return deleted
 
     # ---- Submissions ----
     def create_submission(
@@ -366,6 +434,9 @@ class StandardizationStore:
         ai_cluster_key: str = "",
         source_origin: str = "direct",
         origin_submission_id: str = "",
+        file_hash: str = "",
+        file_size: int = 0,
+        meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         sid = "sub_" + uuid.uuid4().hex[:10]
         ts = _now_iso()
@@ -376,8 +447,9 @@ class StandardizationStore:
                     id, board_id, title, notes, author_label, owner_id, is_anonymous,
                     file_name, file_type, stored_path, extracted_text, char_len,
                     ai_summary, ai_tags_json, ai_cluster_key, source_origin, origin_submission_id,
+                    file_hash, file_size, meta_json,
                     status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                 """,
                 (
                     sid,
@@ -397,6 +469,9 @@ class StandardizationStore:
                     ai_cluster_key[:80],
                     source_origin[:20],
                     origin_submission_id[:40],
+                    (file_hash or "")[:64],
+                    max(0, int(file_size or 0)),
+                    json.dumps(meta or {}, ensure_ascii=False),
                     ts,
                     ts,
                 ),
@@ -407,11 +482,52 @@ class StandardizationStore:
     def _row_to_submission(self, row: sqlite3.Row, mask_author: bool = False) -> dict[str, Any]:
         d = dict(row)
         d["ai_tags"] = json.loads(d.pop("ai_tags_json", "[]") or "[]")
+        d["meta"] = json.loads(d.pop("meta_json", "{}") or "{}")
         if d.get("stored_path"):
             d["stored_path"] = resolve_stored_path(d["stored_path"])
         if mask_author and d.get("is_anonymous"):
             d["author_label"] = "익명 교역자"
         return d
+
+    def find_duplicate_submission(self, board_id: str, file_hash: str) -> dict[str, Any] | None:
+        if not file_hash:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM std_submissions WHERE board_id = ? AND status = 'active' AND file_hash = ? ORDER BY created_at DESC LIMIT 1",
+                (board_id, file_hash),
+            ).fetchone()
+            return self._row_to_submission(row) if row else None
+
+    def update_submission(
+        self,
+        sub_id: str,
+        title: str | None = None,
+        notes: str | None = None,
+        ai_cluster_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        cur = self.get_submission(sub_id)
+        if not cur:
+            return None
+        sets: list[str] = []
+        vals: list[Any] = []
+        if title is not None and title.strip():
+            sets.append("title = ?")
+            vals.append(title.strip()[:160])
+        if notes is not None:
+            sets.append("notes = ?")
+            vals.append(notes.strip()[:5000])
+        if ai_cluster_key is not None:
+            sets.append("ai_cluster_key = ?")
+            vals.append(ai_cluster_key.strip()[:80])
+        if not sets:
+            return cur
+        sets.append("updated_at = ?")
+        vals.append(_now_iso())
+        vals.append(sub_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE std_submissions SET {', '.join(sets)} WHERE id = ?", vals)
+        return self.get_submission(sub_id)
 
     def get_submission(self, sub_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -478,9 +594,26 @@ class StandardizationStore:
             )
 
     def delete_submission(self, sub_id: str) -> bool:
+        stored_to_remove = ""
         with self.connect() as conn:
+            row = conn.execute("SELECT stored_path FROM std_submissions WHERE id = ?", (sub_id,)).fetchone()
             cur = conn.execute("DELETE FROM std_submissions WHERE id = ?", (sub_id,))
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+            if deleted and row and row["stored_path"]:
+                still_ref = conn.execute(
+                    "SELECT 1 FROM std_submissions WHERE stored_path = ? LIMIT 1",
+                    (row["stored_path"],),
+                ).fetchone()
+                if not still_ref:
+                    stored_to_remove = resolve_stored_path(row["stored_path"])
+        if stored_to_remove:
+            try:
+                p = Path(stored_to_remove)
+                if p.exists() and p.is_file():
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return deleted
 
     # ---- Cross-Board Memory (AI Persistent Suggestions & Undo Log) ----
     def create_cross_memory(
@@ -544,7 +677,14 @@ class StandardizationStore:
             ).fetchone()
             return dict(row) if row else None
 
-    def list_cross_memories(self, board_id: str = "", status: str = "") -> list[dict[str, Any]]:
+    def list_cross_memories(
+        self,
+        board_id: str = "",
+        status: str = "",
+        visible_board_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if visible_board_ids is not None and not visible_board_ids:
+            return []
         sql = """
             SELECT m.*,
                    s.title AS submission_title,
@@ -552,6 +692,7 @@ class StandardizationStore:
                    s.ai_summary AS submission_summary,
                    sb.title AS source_board_title,
                    sb.category AS source_board_category,
+                   sb.group_id AS source_board_group_id,
                    COALESCE(tb.title, '') AS target_board_title
             FROM std_cross_memory m
             JOIN std_submissions s ON s.id = m.submission_id
@@ -566,6 +707,12 @@ class StandardizationStore:
         if status:
             sql += " AND m.status = ?"
             params.append(status)
+        if visible_board_ids is not None:
+            ph = ",".join("?" for _ in visible_board_ids)
+            ids_list = sorted(visible_board_ids)
+            sql += f" AND m.source_board_id IN ({ph}) AND (m.target_board_id = '' OR m.target_board_id IN ({ph}))"
+            params.extend(ids_list)
+            params.extend(ids_list)
         sql += " ORDER BY CASE WHEN m.status = 'pending' THEN 0 ELSE 1 END, m.confidence DESC, m.updated_at DESC"
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -751,6 +898,69 @@ class StandardizationStore:
             cur = conn.execute("DELETE FROM std_proposals WHERE id = ?", (proposal_id,))
             return cur.rowcount > 0
 
+    def get_proposal_option(self, option_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM std_proposal_options WHERE id = ?", (option_id,)).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d["source_submission_ids"] = json.loads(d.pop("source_submission_ids_json", "[]") or "[]")
+            return d
+
+    def add_proposal_option(
+        self,
+        proposal_id: str,
+        label: str,
+        title: str,
+        content_md: str,
+        source_submission_ids: list[str] | None = None,
+        is_ai_improved: bool = False,
+    ) -> dict[str, Any]:
+        oid = "opt_" + uuid.uuid4().hex[:10]
+        ts = _now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO std_proposal_options(
+                    id, proposal_id, label, title, content_md, source_submission_ids_json, is_ai_improved, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    oid,
+                    proposal_id,
+                    label[:30],
+                    title[:160],
+                    content_md[:8000],
+                    json.dumps(source_submission_ids or [], ensure_ascii=False),
+                    int(bool(is_ai_improved)),
+                    ts,
+                ),
+            )
+            conn.execute("UPDATE std_proposals SET updated_at = ? WHERE id = ?", (ts, proposal_id))
+        return self.get_proposal_option(oid)  # type: ignore[return-value]
+
+    def update_proposal_option(
+        self,
+        option_id: str,
+        title: str | None = None,
+        content_md: str | None = None,
+        label: str | None = None,
+    ) -> dict[str, Any] | None:
+        cur = self.get_proposal_option(option_id)
+        if not cur:
+            return None
+        new_title = title.strip()[:160] if (title is not None and title.strip()) else cur["title"]
+        new_content = content_md[:12000] if content_md is not None else cur["content_md"]
+        new_label = label.strip()[:30] if (label is not None and label.strip()) else cur["label"]
+        ts = _now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE std_proposal_options SET label = ?, title = ?, content_md = ? WHERE id = ?",
+                (new_label, new_title, new_content, option_id),
+            )
+            conn.execute("UPDATE std_proposals SET updated_at = ? WHERE id = ?", (ts, cur["proposal_id"]))
+        return self.get_proposal_option(option_id)
+
     def add_comment(
         self,
         board_id: str,
@@ -800,6 +1010,9 @@ class StandardizationStore:
         committee_report: dict[str, Any],
         law_audit: list[dict[str, Any]],
         created_by: str = "관리자",
+        hwpx_path: str = "",
+        manuscript: dict[str, Any] | None = None,
+        diff_report: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         pub_id = "pub_" + uuid.uuid4().hex[:10]
         ts = _now_iso()
@@ -807,9 +1020,10 @@ class StandardizationStore:
             conn.execute(
                 """
                 INSERT INTO std_publications(
-                    id, board_id, version_label, title, pdf_path, docx_path, html_snapshot,
-                    committee_report_json, law_audit_json, published_doc_id, created_by, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                    id, board_id, version_label, title, pdf_path, docx_path, hwpx_path, html_snapshot,
+                    committee_report_json, law_audit_json, manuscript_json, diff_report_json,
+                    published_doc_id, forms_registered, created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?)
                 """,
                 (
                     pub_id,
@@ -818,9 +1032,12 @@ class StandardizationStore:
                     title[:160],
                     pdf_path,
                     docx_path,
+                    hwpx_path,
                     html_snapshot,
                     json.dumps(committee_report, ensure_ascii=False),
                     json.dumps(law_audit, ensure_ascii=False),
+                    json.dumps(manuscript or {}, ensure_ascii=False),
+                    json.dumps(diff_report or {}, ensure_ascii=False),
                     created_by[:60],
                     ts,
                 ),
@@ -832,11 +1049,27 @@ class StandardizationStore:
         d = dict(row)
         d["committee_report"] = json.loads(d.pop("committee_report_json", "{}") or "{}")
         d["law_audit"] = json.loads(d.pop("law_audit_json", "[]") or "[]")
+        d["manuscript"] = json.loads(d.pop("manuscript_json", "{}") or "{}")
+        d["diff_report"] = json.loads(d.pop("diff_report_json", "{}") or "{}")
         return d
 
     def get_publication(self, pub_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM std_publications WHERE id = ?", (pub_id,)).fetchone()
+            return self._row_to_pub(row) if row else None
+
+    def get_latest_publication(self, board_id: str, exclude_pub_id: str = "") -> dict[str, Any] | None:
+        with self.connect() as conn:
+            if exclude_pub_id:
+                row = conn.execute(
+                    "SELECT * FROM std_publications WHERE board_id = ? AND id != ? ORDER BY created_at DESC LIMIT 1",
+                    (board_id, exclude_pub_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM std_publications WHERE board_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (board_id,),
+                ).fetchone()
             return self._row_to_pub(row) if row else None
 
     def list_publications(self, board_id: str) -> list[dict[str, Any]]:
@@ -849,6 +1082,7 @@ class StandardizationStore:
             for r in rows:
                 d = self._row_to_pub(r)
                 d.pop("html_snapshot", None)
+                d.pop("manuscript", None)
                 out.append(d)
             return out
 
@@ -857,4 +1091,11 @@ class StandardizationStore:
             conn.execute(
                 "UPDATE std_publications SET published_doc_id = ? WHERE id = ?",
                 (doc_id, pub_id),
+            )
+
+    def mark_publication_forms_registered(self, pub_id: str, count: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE std_publications SET forms_registered = ? WHERE id = ?",
+                (max(0, int(count)), pub_id),
             )

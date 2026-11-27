@@ -1,25 +1,36 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRightLeft,
   BookCheck,
   Calendar,
   Check,
   CheckCircle2,
+  ClipboardCheck,
+  Columns2,
   Copy,
   Download,
   Eye,
   FileCheck2,
+  FileDiff,
+  FileEdit,
   FilePlus2,
+  FileSpreadsheet,
   FileText,
   FolderKanban,
   GitMerge,
+  Image as ImageIcon,
   Layers,
   Loader2,
   MessageSquarePlus,
+  Pencil,
   Plus,
+  Presentation,
   RefreshCw,
   RotateCcw,
+  Save,
   Send,
+  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -30,7 +41,7 @@ import {
   Vote,
   X,
 } from 'lucide-react';
-import { api, authHeaders, triggerTicketDownload } from '../api';
+import { api, authHeaders, safeAssetUrl, triggerTicketDownload } from '../api';
 import type {
   CollabGroup,
   DocumentItem,
@@ -39,10 +50,45 @@ import type {
   StdBoardStatus,
   StdConfig,
   StdCrossMemory,
+  StdDiffReport,
+  StdManuscriptDraft,
+  StdProposal,
   StdPublication,
+  StdSubmission,
 } from '../types';
 import { MarkdownView } from './MarkdownView';
 import { StdConfigModal } from './StdConfigModal';
+import { StdDiffModal, StdManuscriptEditorModal } from './StdManuscriptEditorModal';
+import { StdProposalCompareModal } from './StdProposalCompareModal';
+
+const STD_ACCEPT_ATTR =
+  '.pdf,.docx,.hwpx,.xlsx,.pptx,.txt,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff';
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'tif', 'tiff']);
+
+function isImageSubmission(s: StdSubmission): boolean {
+  return Boolean(s.meta?.is_image) || IMAGE_EXTS.has((s.file_type || '').toLowerCase());
+}
+
+function formatFileSize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function computeDeadlineInfo(deadline?: string): { label: string; expired: boolean; urgent: boolean } | null {
+  const raw = (deadline || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const [y, m, d] = raw.split('-').map(Number);
+  const target = new Date(y, m - 1, d).getTime();
+  const diffDays = Math.round((target - today) / 86_400_000);
+  if (diffDays < 0) return { label: `마감됨 (${raw})`, expired: true, urgent: false };
+  if (diffDays === 0) return { label: '오늘 마감 (D-Day)', expired: false, urgent: true };
+  if (diffDays <= 3) return { label: `마감 D-${diffDays}`, expired: false, urgent: true };
+  return { label: `마감 D-${diffDays} (${raw})`, expired: false, urgent: false };
+}
 
 interface Props {
   isAdmin: boolean;
@@ -131,39 +177,86 @@ export const StandardizationWorkspace: React.FC<Props> = ({
   const [newDesc, setNewDesc] = useState('');
   const [newGuide, setNewGuide] = useState('');
   const [newDeadline, setNewDeadline] = useState('');
+  const [newQuorumTarget, setNewQuorumTarget] = useState<number>(0);
   const [newVoteVis, setNewVoteVis] = useState<'named' | 'anonymous'>('named');
   const [newSubAnon, setNewSubAnon] = useState(false);
   const [newAllowChange, setNewAllowChange] = useState(true);
   const [newAutoRoute, setNewAutoRoute] = useState(false);
 
-  // Submission composer
+  // Multi-file Drag & Drop Submission composer
   const fileRef = useRef<HTMLInputElement>(null);
   const [subTitle, setSubTitle] = useState('');
   const [subNotes, setSubNotes] = useState('');
-  const [subFile, setSubFile] = useState<File | null>(null);
+  const [subFiles, setSubFiles] = useState<File[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+  const [uploadProgressText, setUploadProgressText] = useState('');
   const [selectedSubIds, setSelectedSubIds] = useState<string[]>([]);
   const [batchTargetBoardId, setBatchTargetBoardId] = useState('');
   const [batchMergedTitle, setBatchMergedTitle] = useState('');
   const [expandedSubId, setExpandedSubId] = useState('');
+  const [lightboxSub, setLightboxSub] = useState<StdSubmission | null>(null);
+  const [editingSubId, setEditingSubId] = useState('');
+  const [editSubTitle, setEditSubTitle] = useState('');
+  const [editSubNotes, setEditSubNotes] = useState('');
+  const [editSubCluster, setEditSubCluster] = useState('');
 
-  // Voting & Comments
+  // Voting, Compare, Option Inline Polish & Comments
   const [commentText, setCommentText] = useState('');
   const [commentKind, setCommentKind] = useState<'improvement' | 'question' | 'decision'>('improvement');
   const [showManualProposal, setShowManualProposal] = useState(false);
   const [propTitle, setPropTitle] = useState('');
   const [propOptA, setPropOptA] = useState('');
   const [propOptB, setPropOptB] = useState('');
+  const [voteComments, setVoteComments] = useState<Record<string, string>>({});
+  const [expandedVotersOptId, setExpandedVotersOptId] = useState('');
+  const [compareProposal, setCompareProposal] = useState<StdProposal | null>(null);
+  const [editingOptionId, setEditingOptionId] = useState('');
+  const [editOptTitle, setEditOptTitle] = useState('');
+  const [editOptContent, setEditOptContent] = useState('');
 
   // Cross-memory manual target override for deferred items
   const [memTargetOverrides, setMemTargetOverrides] = useState<Record<string, string>>({});
 
-  // Expert Committee PDF Compile
+  // Expert Committee Compilation (1-Click + 2-Stage Draft Editor + Revision Diff + Forms Vault Sync)
   const [compileVersion, setCompileVersion] = useState('');
   const [compileDirectives, setCompileDirectives] = useState('');
+  const [compileIncludeImages, setCompileIncludeImages] = useState(true);
   const [compileStages, setCompileStages] = useState<Array<{ stage: number; role: string; message: string }>>([]);
   const [compiling, setCompiling] = useState(false);
+  const [finalizingDraft, setFinalizingDraft] = useState(false);
+  const [draftSession, setDraftSession] = useState<{
+    version_label: string;
+    manuscript: StdManuscriptDraft;
+    law_audit: Array<{ source: string; status: string; note: string }>;
+    vote_summary: Array<Record<string, unknown>>;
+    ai_engine: string;
+  } | null>(null);
+  const [diffModalState, setDiffModalState] = useState<{ title: string; diff: StdDiffReport } | null>(null);
   const [previewPub, setPreviewPub] = useState<StdPublication | null>(null);
   const [publishReplaceMap, setPublishReplaceMap] = useState<Record<string, string>>({});
+
+  // Group leader can fully manage their own group's boards (Pass-1 fix!)
+  const canManageBoard = useMemo(() => {
+    if (isAdmin) return true;
+    if (!detail) return false;
+    if (detail.can_manage || detail.board.can_manage) return true;
+    return Boolean(detail.board.group_id && leaderGroups.some((g) => g.id === detail.board.group_id));
+  }, [isAdmin, detail, leaderGroups]);
+
+  const deadlineInfo = useMemo(() => computeDeadlineInfo(detail?.board.deadline), [detail?.board.deadline]);
+
+  const boardMetrics = useMemo(() => {
+    if (!detail) return { participants: 0, maxVotes: 0, imageCount: 0 };
+    const people = new Set<string>();
+    detail.submissions.forEach((s) => people.add(s.owner_id || s.author_label));
+    detail.comments.forEach((c) => people.add(c.owner_id || c.author_label));
+    let maxVotes = 0;
+    detail.proposals.forEach((p) => {
+      if (p.total_votes > maxVotes) maxVotes = p.total_votes;
+    });
+    const imageCount = detail.submissions.filter(isImageSubmission).length;
+    return { participants: Math.max(people.size, maxVotes), maxVotes, imageCount };
+  }, [detail]);
 
   const flashNotice = (msg: string) => {
     setNotice(msg);
@@ -279,6 +372,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
         description: newDesc.trim(),
         guidelines: newGuide.trim(),
         deadline: newDeadline.trim(),
+        quorum_target: Math.max(0, Number(newQuorumTarget) || 0),
         vote_visibility: newVoteVis,
         submission_anonymous: newSubAnon,
         allow_vote_change: newAllowChange,
@@ -289,6 +383,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
       setNewDesc('');
       setNewGuide('');
       setNewDeadline('');
+      setNewQuorumTarget(0);
       await loadBoards(created.id);
       const wakeCount = created.matched_memories?.length || 0;
       flashNotice(
@@ -303,34 +398,115 @@ export const StandardizationWorkspace: React.FC<Props> = ({
     }
   };
 
+  const addQueuedFiles = (incoming: FileList | File[]) => {
+    const arr = Array.from(incoming || []);
+    if (arr.length === 0) return;
+    setSubFiles((prev) => {
+      const seen = new Set(prev.map((f) => `${f.name}:${f.size}`));
+      const next = [...prev];
+      for (const f of arr) {
+        const key = `${f.name}:${f.size}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          next.push(f);
+        }
+      }
+      return next.slice(0, 12);
+    });
+  };
+
   const handleSubmitFile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeBoardId || (!subFile && !subTitle.trim() && !subNotes.trim()) || busy) return;
+    if (!activeBoardId || (subFiles.length === 0 && !subTitle.trim() && !subNotes.trim()) || busy) return;
     setBusy(true);
     setError('');
+    setUploadProgressText('');
     try {
-      const res = await api.stdSubmit(activeBoardId, {
-        title: subTitle.trim(),
-        notes: subNotes.trim(),
-        file: subFile,
-        use_ai: true,
-      });
+      const filesToSend: Array<File | null> = subFiles.length > 0 ? subFiles : [null];
+      let totalMem = 0;
+      let totalAuto = 0;
+      const duplicateNotes: string[] = [];
+
+      for (let idx = 0; idx < filesToSend.length; idx++) {
+        const f = filesToSend[idx];
+        const perTitle =
+          filesToSend.length === 1
+            ? subTitle.trim()
+            : subTitle.trim()
+              ? `${subTitle.trim()} (${idx + 1})`
+              : '';
+        setUploadProgressText(
+          f
+            ? `${idx + 1} / ${filesToSend.length} 처리 중: ${f.name} (내용 추출 · AI 분석 중...)`
+            : '현장 의견 등록 및 AI 분석 중...'
+        );
+        const res = await api.stdSubmit(activeBoardId, {
+          title: perTitle,
+          notes: subNotes.trim(),
+          file: f,
+          use_ai: true,
+        });
+        totalMem += res.analysis?.memories?.length || 0;
+        totalAuto += res.analysis?.auto_applied_count || 0;
+        if (res.duplicate_of) {
+          duplicateNotes.push(`${f?.name || res.submission.title} (기존 '${res.duplicate_of.title}'와 동일)`);
+        }
+      }
+
       setSubTitle('');
       setSubNotes('');
-      setSubFile(null);
+      setSubFiles([]);
+      setUploadProgressText('');
       if (fileRef.current) fileRef.current.value = '';
       await refreshActiveBoard();
-      const memCnt = res.analysis?.memories?.length || 0;
-      const autoCnt = res.analysis?.auto_applied_count || 0;
+
+      const dupMsg = duplicateNotes.length > 0 ? ` · 참고: 중복 파일 ${duplicateNotes.length}건 감지` : '';
       flashNotice(
-        autoCnt > 0
-          ? `제출 완료 · AI가 고신뢰도 교차 분류 ${autoCnt}건을 자동 배치했습니다(되돌리기 가능).`
-          : memCnt > 0
-            ? `제출 완료 · AI가 타 분류 이동/병행 추천 ${memCnt}건을 교차 기억함에 기록했습니다.`
-            : '행정 자료가 성공적으로 제출되고 AI 요약·분류 분석이 완료되었습니다.'
+        totalAuto > 0
+          ? `${filesToSend.length}건 제출 완료 · AI가 고신뢰도 교차 분류 ${totalAuto}건을 자동 배치했습니다(되돌리기 가능)${dupMsg}`
+          : totalMem > 0
+            ? `${filesToSend.length}건 제출 완료 · AI가 타 분류 추천 ${totalMem}건을 교차 기억함에 기록했습니다${dupMsg}`
+            : `${filesToSend.length}건의 행정 자료 제출 및 AI 요약·분류 분석이 완료되었습니다${dupMsg}`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : '제출 처리 오류');
+    } finally {
+      setUploadProgressText('');
+      setBusy(false);
+    }
+  };
+
+  const handleSaveSubmissionEdit = async (subId: string, reanalyze = false) => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.stdUpdateSubmission(subId, {
+        title: editSubTitle.trim() || undefined,
+        notes: editSubNotes,
+        ai_cluster_key: editSubCluster.trim(),
+        reanalyze,
+      });
+      setEditingSubId('');
+      await refreshActiveBoard();
+      flashNotice(reanalyze ? '자료 수정 및 AI 재분석이 완료되었습니다.' : '제출 자료 정보가 수정되었습니다.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '제출 자료 수정 실패');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleReanalyzeSubmission = async (sub: StdSubmission) => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.stdUpdateSubmission(sub.id, { reanalyze: true, use_ai: true });
+      await refreshActiveBoard();
+      flashNotice(`"${sub.title}" 자료의 AI 요약·분류 재분석이 완료되었습니다.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'AI 재분석 실패');
     } finally {
       setBusy(false);
     }
@@ -444,11 +620,34 @@ export const StandardizationWorkspace: React.FC<Props> = ({
     setBusy(true);
     setError('');
     try {
-      await api.stdCastVote(proposalId, optionId);
+      const comment = (voteComments[proposalId] || '').trim();
+      await api.stdCastVote(proposalId, optionId, comment);
+      if (comment) {
+        setVoteComments((prev) => ({ ...prev, [proposalId]: '' }));
+      }
       await refreshActiveBoard();
       flashNotice('투표가 반영되었습니다.');
     } catch (err) {
       setError(err instanceof Error ? err.message : '투표 처리 오류');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveOptionEdit = async (optionId: string) => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api.stdUpdateProposalOption(optionId, {
+        title: editOptTitle.trim() || undefined,
+        content_md: editOptContent,
+      });
+      setEditingOptionId('');
+      await refreshActiveBoard();
+      flashNotice('후보안 문구가 저장되었습니다.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '후보안 문구 수정 실패');
     } finally {
       setBusy(false);
     }
@@ -469,30 +668,39 @@ export const StandardizationWorkspace: React.FC<Props> = ({
     }
   };
 
-  const handleCompilePdf = async () => {
+  const _buildCompilePayload = () => {
+    const customSlotsArr =
+      compileApprovalPresetId === '__custom__'
+        ? compileCustomSlots
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined;
+    return {
+      version_label: compileVersion.trim(),
+      custom_directives: compileDirectives.trim(),
+      approval_preset_id:
+        compileApprovalPresetId && compileApprovalPresetId !== '__custom__' ? compileApprovalPresetId : '',
+      custom_approval_slots: customSlotsArr,
+      include_images: compileIncludeImages,
+    };
+  };
+
+  const handleCompilePdf = async (mode: 'direct' | 'draft' = 'direct') => {
     if (!activeBoardId || compiling) return;
     setCompiling(true);
     setCompileStages([]);
     setError('');
     try {
-      const customSlotsArr =
-        compileApprovalPresetId === '__custom__'
-          ? compileCustomSlots
-              .split(',')
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : undefined;
-      const res = await fetch(`/api/std/boards/${encodeURIComponent(activeBoardId)}/compile/stream`, {
+      const endpoint =
+        mode === 'draft'
+          ? `/api/std/boards/${encodeURIComponent(activeBoardId)}/compile/draft-stream`
+          : `/api/std/boards/${encodeURIComponent(activeBoardId)}/compile/stream`;
+      const res = await fetch(endpoint, {
         method: 'POST',
         credentials: 'include',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          version_label: compileVersion.trim(),
-          custom_directives: compileDirectives.trim(),
-          approval_preset_id:
-            compileApprovalPresetId && compileApprovalPresetId !== '__custom__' ? compileApprovalPresetId : '',
-          custom_approval_slots: customSlotsArr,
-        }),
+        body: JSON.stringify(_buildCompilePayload()),
       });
       if (!res.ok || !res.body) throw new Error(`편찬 요청 오류 (${res.status})`);
 
@@ -514,14 +722,28 @@ export const StandardizationWorkspace: React.FC<Props> = ({
             else if (ln.startsWith('data:')) dataStr += ln.slice(5).trim();
           }
           if (!dataStr) continue;
-          const payload = JSON.parse(dataStr);
+          let payload: Record<string, any>;
+          try {
+            payload = JSON.parse(dataStr);
+          } catch {
+            continue;
+          }
           if (ev === 'stage') {
-            setCompileStages((prev) => [...prev, payload]);
+            setCompileStages((prev) => [...prev, payload as { stage: number; role: string; message: string }]);
+          } else if (ev === 'draft') {
+            setDraftSession({
+              version_label: payload.version_label || compileVersion.trim() || 'v1.0',
+              manuscript: payload.manuscript,
+              law_audit: payload.law_audit || [],
+              vote_summary: payload.vote_summary || [],
+              ai_engine: payload.ai_engine || 'edited-manuscript',
+            });
+            flashNotice('원고 초안과 v4.0 법규 감사가 준비되었습니다. 검토·수정 후 최종 조판해 주세요.');
           } else if (ev === 'done') {
             setCompileVersion('');
             await refreshActiveBoard();
             if (payload.publication) setPreviewPub(payload.publication);
-            flashNotice('4역할 전문가 위원회 정규 PDF 및 Word 편찬이 완료되었습니다!');
+            flashNotice('4역할 전문가 위원회 정규 PDF · Word · 한글(HWPX) 3종 편찬이 완료되었습니다!');
           } else if (ev === 'error') {
             setError(payload.message || '편찬 오류');
           }
@@ -531,6 +753,63 @@ export const StandardizationWorkspace: React.FC<Props> = ({
       setError(err instanceof Error ? err.message : 'PDF 편찬 실패');
     } finally {
       setCompiling(false);
+    }
+  };
+
+  const handleFinalizeEditedDraft = async (edited: StdManuscriptDraft, version: string) => {
+    if (!activeBoardId || !draftSession || finalizingDraft) return;
+    setFinalizingDraft(true);
+    setError('');
+    try {
+      const cfg = _buildCompilePayload();
+      const res = await api.stdFinalizeManuscript(activeBoardId, {
+        version_label: version.trim() || draftSession.version_label,
+        manuscript: edited,
+        law_audit: draftSession.law_audit,
+        vote_summary: draftSession.vote_summary,
+        approval_preset_id: cfg.approval_preset_id,
+        custom_approval_slots: cfg.custom_approval_slots,
+        ai_engine: `${draftSession.ai_engine}+edited`,
+        include_images: compileIncludeImages,
+      });
+      setDraftSession(null);
+      setCompileVersion('');
+      await refreshActiveBoard();
+      if (res.publication) setPreviewPub(res.publication);
+      flashNotice('직접 편집한 원고로 PDF · Word · 한글(HWPX) 3종 조판이 완료되었습니다!');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '최종 조판 실패');
+    } finally {
+      setFinalizingDraft(false);
+    }
+  };
+
+  const handleOpenDiffModal = async (pub: StdPublication) => {
+    if (pub.diff_report && (pub.diff_report.rows?.length || 0) > 0) {
+      setDiffModalState({ title: `${pub.title} (${pub.version_label})`, diff: pub.diff_report });
+      return;
+    }
+    try {
+      const res = await api.stdGetPublicationDiff(pub.id);
+      setDiffModalState({ title: `${res.title} (${res.version_label})`, diff: res.diff_report || {} });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '신·구조문 대조표를 불러오지 못했습니다.');
+    }
+  };
+
+  const handleRegisterFormsToVault = async (pub: StdPublication) => {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      const res = await api.stdRegisterPublicationForms(pub.id, activeNotebookId);
+      onQaDocumentsUpdated();
+      await refreshActiveBoard();
+      flashNotice(`표준 서식 ${res.registered_count}종이 오른쪽 [서식·표 보관함]에 등록되었습니다.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '서식 보관함 등록 실패');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -697,8 +976,8 @@ export const StandardizationWorkspace: React.FC<Props> = ({
 
       {/* Main Content Area */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white">
-        {/* Mobile board switcher bar */}
-        <div className="flex items-center justify-between gap-2 border-b border-black/[0.07] bg-[#f7f7f5] px-3 py-2 md:hidden">
+        {/* Mobile board switcher bar — includes Cross-Memory & Settings access! */}
+        <div className="flex items-center justify-between gap-1.5 border-b border-black/[0.07] bg-[#f7f7f5] px-3 py-2 md:hidden">
           <select
             value={activeBoardId}
             onChange={(e) => void handleSelectBoard(e.target.value)}
@@ -714,6 +993,31 @@ export const StandardizationWorkspace: React.FC<Props> = ({
               ))
             )}
           </select>
+          <button
+            type="button"
+            onClick={() => setShowGlobalMemoryView((v) => !v)}
+            title="전체 교차 분류 기억함"
+            aria-label="전체 교차 분류 기억함"
+            className={`chip-nowrap inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-xs font-semibold ${
+              showGlobalMemoryView
+                ? 'border-[#18181b] bg-[#18181b] text-white'
+                : 'border-black/[0.1] bg-white text-[#18181b]'
+            }`}
+          >
+            <ArrowRightLeft className="h-3.5 w-3.5" />
+            <span>{globalMemories.length}</span>
+          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => setShowConfigModal(true)}
+              title="표준화실 규격·결재선·표지 설정"
+              aria-label="표준화실 설정"
+              className="rounded-lg border border-black/[0.1] bg-white p-1.5 text-[#52525b]"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+            </button>
+          )}
           {canCreateBoard && (
             <button
               type="button"
@@ -779,7 +1083,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                         </span>
                       </div>
                       <p className="text-xs text-[#3f3f46]">{m.reason}</p>
-                      {isAdmin && (
+                      {(isAdmin || boards.some((b) => b.id === m.source_board_id && b.can_manage)) && (
                         <div className="flex flex-wrap items-center gap-2 pt-1">
                           <select
                             value={memTargetOverrides[m.id] || m.target_board_id || ''}
@@ -850,9 +1154,22 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                     <span className="text-xs font-medium text-[#0f4c81]">{detail.board.category}</span>
                     <span className="text-xs text-[#8a8a8e]">· {detail.board.work_type}</span>
                     {detail.board.deadline && (
-                      <span className="chip-nowrap inline-flex items-center gap-1 text-[11px] text-[#71717a]">
+                      <span
+                        className={`chip-nowrap inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-semibold ${
+                          deadlineInfo?.expired
+                            ? 'bg-red-50 text-red-700'
+                            : deadlineInfo?.urgent
+                              ? 'bg-amber-50 text-amber-800'
+                              : 'text-[#71717a]'
+                        }`}
+                      >
                         <Calendar className="h-3 w-3" />
-                        마감 {detail.board.deadline}
+                        <span>{deadlineInfo ? deadlineInfo.label : `마감 ${detail.board.deadline}`}</span>
+                      </span>
+                    )}
+                    {!isAdmin && canManageBoard && (
+                      <span className="chip-nowrap rounded-md bg-emerald-50 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-800">
+                        그룹장 관리 권한
                       </span>
                     )}
                   </div>
@@ -860,9 +1177,33 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                   {detail.board.description && (
                     <p className="text-xs text-[#52525b]">{detail.board.description}</p>
                   )}
+                  {/* Compact Progress Dashboard Strip */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-[#52525b]">
+                    <span className="chip-nowrap rounded-md bg-[#f7f7f5] px-2 py-0.5 font-medium">
+                      수집 자료 <strong className="text-[#18181b]">{detail.submissions.length}건</strong>
+                      {boardMetrics.imageCount > 0 ? ` (이미지 ${boardMetrics.imageCount})` : ''}
+                    </span>
+                    <span className="chip-nowrap rounded-md bg-[#f7f7f5] px-2 py-0.5 font-medium">
+                      참여 인원 <strong className="text-[#18181b]">{boardMetrics.participants}명</strong>
+                    </span>
+                    <span className="chip-nowrap rounded-md bg-[#f7f7f5] px-2 py-0.5 font-medium">
+                      투표 안건 <strong className="text-[#18181b]">{detail.proposals.length}건</strong>
+                    </span>
+                    {(detail.board.quorum_target || 0) > 0 && (
+                      <span
+                        className={`chip-nowrap rounded-md px-2 py-0.5 font-semibold ${
+                          boardMetrics.maxVotes >= (detail.board.quorum_target || 0)
+                            ? 'bg-emerald-50 text-emerald-800'
+                            : 'bg-[#0f4c81]/10 text-[#0f4c81]'
+                        }`}
+                      >
+                        투표 정족수 {boardMetrics.maxVotes}/{detail.board.quorum_target}명
+                      </span>
+                    )}
+                  </div>
                 </div>
 
-                {isAdmin && (
+                {canManageBoard && (
                   <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                     <select
                       aria-label="진행 단계"
@@ -948,7 +1289,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                 {subTab === 'submissions' && (
                   <>
                     {/* Cross-Board Pending Memory Wake-up Banner */}
-                    {pendingForCurrentBoard.length > 0 && isAdmin && (
+                    {pendingForCurrentBoard.length > 0 && canManageBoard && (
                       <div className="rounded-xl border border-[#0f4c81]/25 bg-[#0f4c81]/[0.04] p-3.5 space-y-2">
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-1.5 text-xs font-semibold text-[#0f4c81]">
@@ -969,14 +1310,34 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                       </div>
                     )}
 
-                    {/* Pastor / Member Upload Composer */}
-                    <form onSubmit={handleSubmitFile} className="space-y-3 rounded-xl border border-black/[0.08] bg-[#fafaf9] p-4">
-                      <div className="flex items-center justify-between">
+                    {/* Pastor / Member Multi-File Drag & Drop Upload Composer */}
+                    <form
+                      onSubmit={handleSubmitFile}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        setDragActive(true);
+                      }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        setDragActive(false);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setDragActive(false);
+                        if (e.dataTransfer.files?.length) addQueuedFiles(e.dataTransfer.files);
+                      }}
+                      className={`space-y-3 rounded-xl border p-4 transition ${
+                        dragActive
+                          ? 'border-[#0f4c81] bg-[#0f4c81]/[0.05] ring-2 ring-[#0f4c81]/25'
+                          : 'border-black/[0.08] bg-[#fafaf9]'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-1.5">
                         <span className="text-xs font-semibold text-[#18181b]">
                           행정 파일 및 현장 의견 제출
                         </span>
                         <span className="text-[11px] text-[#71717a]">
-                          PDF · DOCX · HWPX · XLSX · TXT 지원 (업로드 즉시 AI 요약 및 교차 분류 분석)
+                          PDF · Word · 한글(HWPX) · Excel · PPTX · 이미지(사진 자동 글자인식) · 여러 파일 끌어다 놓기 (개당 30MB)
                         </span>
                       </div>
 
@@ -992,9 +1353,12 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                           <input
                             ref={fileRef}
                             type="file"
-                            accept=".pdf,.docx,.hwpx,.xlsx,.txt,.md"
+                            multiple
+                            accept={STD_ACCEPT_ATTR}
                             className="hidden"
-                            onChange={(e) => setSubFile(e.target.files?.[0] || null)}
+                            onChange={(e) => {
+                              if (e.target.files?.length) addQueuedFiles(e.target.files);
+                            }}
                           />
                           <button
                             type="button"
@@ -1002,10 +1366,43 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                             className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg border border-dashed border-black/[0.18] bg-white px-3 py-2 text-xs font-medium text-[#3f3f46] hover:border-[#18181b]"
                           >
                             <FilePlus2 className="h-3.5 w-3.5 shrink-0 text-[#0f4c81]" />
-                            <span className="truncate">{subFile ? subFile.name : '행정 파일 첨부 (선택)'}</span>
+                            <span className="truncate">
+                              {subFiles.length > 0
+                                ? `파일 ${subFiles.length}개 선택됨 (추가 선택 가능)`
+                                : '파일 선택 또는 여기에 끌어다 놓기 (문서·PPTX·사진)'}
+                            </span>
                           </button>
                         </div>
                       </div>
+
+                      {subFiles.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {subFiles.map((f, fIdx) => (
+                            <span
+                              key={`${f.name}-${f.size}-${fIdx}`}
+                              className="chip-nowrap inline-flex items-center gap-1.5 rounded-md border border-black/[0.08] bg-white px-2 py-1 text-[11px] font-medium text-[#18181b]"
+                            >
+                              {IMAGE_EXTS.has((f.name.split('.').pop() || '').toLowerCase()) ? (
+                                <ImageIcon className="h-3 w-3 text-[#0f4c81]" />
+                              ) : f.name.toLowerCase().endsWith('.pptx') ? (
+                                <Presentation className="h-3 w-3 text-amber-700" />
+                              ) : (
+                                <FileText className="h-3 w-3 text-[#52525b]" />
+                              )}
+                              <span className="max-w-[180px] truncate">{f.name}</span>
+                              <span className="text-[10px] text-[#8a8a8e]">{formatFileSize(f.size)}</span>
+                              <button
+                                type="button"
+                                onClick={() => setSubFiles((prev) => prev.filter((_, i) => i !== fIdx))}
+                                aria-label="대기 파일 제거"
+                                className="text-[#8a8a8e] hover:text-red-600"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
 
                       <textarea
                         rows={2}
@@ -1015,23 +1412,30 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                         className="w-full rounded-lg border border-black/[0.1] bg-white px-3 py-2 text-[16px] leading-relaxed text-[#18181b] outline-none focus:border-[#18181b] lg:text-xs"
                       />
 
+                      {uploadProgressText && (
+                        <div className="flex items-center gap-2 rounded-lg border border-[#0f4c81]/20 bg-[#0f4c81]/[0.05] px-3 py-2 text-xs font-medium text-[#0f4c81]">
+                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                          <span className="truncate">{uploadProgressText}</span>
+                        </div>
+                      )}
+
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[11px] text-[#8a8a8e]">
                           {detail.board.submission_anonymous ? '익명 제출 게시글' : '실명 기록 게시글'}
                         </span>
                         <button
                           type="submit"
-                          disabled={busy || (!subFile && !subTitle.trim() && !subNotes.trim())}
+                          disabled={busy || (subFiles.length === 0 && !subTitle.trim() && !subNotes.trim())}
                           className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#18181b] px-4 py-2 text-xs font-semibold text-white hover:bg-[#27272a] disabled:opacity-40"
                         >
                           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-                          <span>제출 및 AI 분석</span>
+                          <span>{subFiles.length > 1 ? `${subFiles.length}개 일괄 제출 · AI 분석` : '제출 및 AI 분석'}</span>
                         </button>
                       </div>
                     </form>
 
-                    {/* Admin Manual Multi-Select Move / Copy / Merge Bar */}
-                    {isAdmin && selectedSubIds.length > 0 && (
+                    {/* Manager Manual Multi-Select Move / Copy / Merge Bar */}
+                    {canManageBoard && selectedSubIds.length > 0 && (
                       <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#18181b]/20 bg-[#18181b] px-4 py-2.5 text-white">
                         <span className="text-xs font-semibold">{selectedSubIds.length}개 자료 선택됨</span>
                         <div className="flex flex-wrap items-center gap-1.5">
@@ -1041,11 +1445,13 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                             className="rounded-md bg-white px-2.5 py-1 text-xs font-medium text-[#18181b]"
                           >
                             <option value="">대상 분류 게시글 선택...</option>
-                            {boards.map((b) => (
-                              <option key={b.id} value={b.id}>
-                                {b.title} ({b.category})
-                              </option>
-                            ))}
+                            {boards
+                              .filter((b) => isAdmin || b.can_manage)
+                              .map((b) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.title} ({b.category})
+                                </option>
+                              ))}
                           </select>
                           <input
                             type="text"
@@ -1087,17 +1493,21 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                     <div className="divide-y divide-black/[0.06] rounded-xl border border-black/[0.07] bg-white">
                       {detail.submissions.length === 0 ? (
                         <div className="p-10 text-center text-xs text-[#8a8a8e]">
-                          아직 제출된 행정 파일이 없습니다. 위 양식에서 첫 파일을 올려보세요.
+                          아직 제출된 행정 파일이 없습니다. 위 양식에서 문서·PPTX·사진 파일을 올려보세요.
                         </div>
                       ) : (
                         detail.submissions.map((s) => {
                           const checked = selectedSubIds.includes(s.id);
                           const expanded = expandedSubId === s.id;
+                          const isImg = isImageSubmission(s);
+                          const isPptx = Boolean(s.meta?.is_pptx) || (s.file_type || '').toLowerCase() === 'pptx';
+                          const canEditThis = canManageBoard || s.owner_id === currentOwnerId;
+                          const isEditing = editingSubId === s.id;
                           return (
-                            <div key={s.id} className="p-4 space-y-2">
+                            <div key={s.id} className="p-4 space-y-2.5">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex min-w-0 flex-1 items-start gap-2.5">
-                                  {isAdmin && (
+                                  {canManageBoard && (
                                     <input
                                       type="checkbox"
                                       checked={checked}
@@ -1109,12 +1519,46 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                       className="mt-1 h-4 w-4 accent-[#18181b]"
                                     />
                                   )}
+                                  {isImg && s.stored_path && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setLightboxSub(s)}
+                                      title="이미지 크게 보기"
+                                      className="h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-black/[0.1] bg-[#f7f7f5] transition hover:opacity-90"
+                                    >
+                                      <img
+                                        src={safeAssetUrl(`/api/std/submissions/${encodeURIComponent(s.id)}/file`)}
+                                        alt={s.title}
+                                        className="h-full w-full object-cover"
+                                        loading="lazy"
+                                      />
+                                    </button>
+                                  )}
                                   <div className="min-w-0 flex-1">
                                     <div className="flex flex-wrap items-center gap-1.5">
                                       <h3 className="text-[13.5px] font-semibold text-[#18181b]">{s.title}</h3>
                                       {s.file_name && (
-                                        <span className="chip-nowrap rounded bg-[#f7f7f5] px-1.5 py-0.5 text-[10.5px] font-medium text-[#52525b]">
-                                          {s.file_name}
+                                        <span className="chip-nowrap inline-flex items-center gap-1 rounded bg-[#f7f7f5] px-1.5 py-0.5 text-[10.5px] font-medium text-[#52525b]">
+                                          {isImg ? (
+                                            <ImageIcon className="h-3 w-3 text-[#0f4c81]" />
+                                          ) : isPptx ? (
+                                            <Presentation className="h-3 w-3 text-amber-700" />
+                                          ) : (
+                                            <FileText className="h-3 w-3" />
+                                          )}
+                                          <span>{s.file_name}</span>
+                                          {s.file_size ? <span className="text-[#8a8a8e]">({formatFileSize(s.file_size)})</span> : null}
+                                        </span>
+                                      )}
+                                      {isPptx && (s.meta?.slide_count || 0) > 0 && (
+                                        <span className="chip-nowrap rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+                                          슬라이드 {s.meta?.slide_count}장
+                                          {(s.meta?.table_count || 0) > 0 ? ` · 표 ${s.meta?.table_count}` : ''}
+                                        </span>
+                                      )}
+                                      {isImg && (s.meta?.ocr_chars || 0) > 0 && (
+                                        <span className="chip-nowrap rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
+                                          사진 글자인식 완료
                                         </span>
                                       )}
                                       {s.source_origin !== 'direct' && (
@@ -1130,7 +1574,23 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                   </div>
                                 </div>
 
-                                <div className="flex shrink-0 items-center gap-1">
+                                <div className="flex shrink-0 flex-wrap items-center gap-1">
+                                  {s.stored_path && s.file_name && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void triggerTicketDownload(
+                                          `/api/std/submissions/${encodeURIComponent(s.id)}/file?download=1`,
+                                          s.file_name
+                                        )
+                                      }
+                                      title="원본 파일 다운로드"
+                                      className="chip-nowrap inline-flex items-center gap-1 rounded-md border border-black/[0.08] bg-[#fafaf9] px-2 py-1 text-[11px] font-medium text-[#18181b] hover:bg-black/[0.05]"
+                                    >
+                                      <Download className="h-3 w-3" />
+                                      <span>원본</span>
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
                                     onClick={() => setExpandedSubId(expanded ? '' : s.id)}
@@ -1139,18 +1599,102 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                     <Eye className="h-3.5 w-3.5" />
                                     <span>{expanded ? '접기' : '내용'}</span>
                                   </button>
-                                  {(isAdmin || s.owner_id === currentOwnerId) && (
-                                    <button
-                                      type="button"
-                                      onClick={() => void api.stdDeleteSubmission(s.id).then(() => refreshActiveBoard())}
-                                      aria-label="제출 삭제"
-                                      className="rounded-md p-1 text-[#a1a1aa] hover:bg-red-50 hover:text-red-600"
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5" />
-                                    </button>
+                                  {canEditThis && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (isEditing) {
+                                            setEditingSubId('');
+                                          } else {
+                                            setEditingSubId(s.id);
+                                            setEditSubTitle(s.title);
+                                            setEditSubNotes(s.notes);
+                                            setEditSubCluster(s.ai_cluster_key || '');
+                                          }
+                                        }}
+                                        title="제목·메모·묶음 수정"
+                                        className="rounded-md p-1 text-[#71717a] hover:bg-black/[0.05] hover:text-[#18181b]"
+                                      >
+                                        <Pencil className="h-3.5 w-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={busy}
+                                        onClick={() => void handleReanalyzeSubmission(s)}
+                                        title="AI 요약·분류 다시 분석"
+                                        className="rounded-md p-1 text-[#71717a] hover:bg-black/[0.05] hover:text-[#0f4c81] disabled:opacity-40"
+                                      >
+                                        <RefreshCw className="h-3.5 w-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void api.stdDeleteSubmission(s.id).then(() => refreshActiveBoard())}
+                                        aria-label="제출 삭제"
+                                        title="제출 삭제"
+                                        className="rounded-md p-1 text-[#a1a1aa] hover:bg-red-50 hover:text-red-600"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                      </button>
+                                    </>
                                   )}
                                 </div>
                               </div>
+
+                              {isEditing && (
+                                <div className="ml-6 space-y-2 rounded-lg border border-[#0f4c81]/25 bg-[#fafaf9] p-3">
+                                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    <input
+                                      type="text"
+                                      value={editSubTitle}
+                                      onChange={(e) => setEditSubTitle(e.target.value)}
+                                      placeholder="자료 제목"
+                                      className="rounded-md border border-black/[0.1] bg-white px-2.5 py-1.5 text-xs font-semibold"
+                                    />
+                                    <input
+                                      type="text"
+                                      value={editSubCluster}
+                                      onChange={(e) => setEditSubCluster(e.target.value)}
+                                      placeholder="유사 규격 묶음명 (예: 재정 지출·결의 규격)"
+                                      className="rounded-md border border-black/[0.1] bg-white px-2.5 py-1.5 text-xs"
+                                    />
+                                  </div>
+                                  <textarea
+                                    rows={2}
+                                    value={editSubNotes}
+                                    onChange={(e) => setEditSubNotes(e.target.value)}
+                                    placeholder="현장 설명 및 메모"
+                                    className="w-full rounded-md border border-black/[0.1] bg-white p-2 text-xs"
+                                  />
+                                  <div className="flex flex-wrap justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingSubId('')}
+                                      className="chip-nowrap rounded-md px-2.5 py-1 text-[11px] text-[#71717a]"
+                                    >
+                                      취소
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={busy}
+                                      onClick={() => void handleSaveSubmissionEdit(s.id, false)}
+                                      className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#18181b] px-2.5 py-1 text-[11px] font-semibold text-white"
+                                    >
+                                      <Save className="h-3 w-3" />
+                                      <span>저장</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={busy}
+                                      onClick={() => void handleSaveSubmissionEdit(s.id, true)}
+                                      className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#0f4c81] px-2.5 py-1 text-[11px] font-semibold text-white"
+                                    >
+                                      <Sparkles className="h-3 w-3" />
+                                      <span>저장 + AI 재분석</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
 
                               {s.ai_summary && (
                                 <p className="pl-6 text-xs leading-relaxed text-[#3f3f46]">{s.ai_summary}</p>
@@ -1167,7 +1711,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                               {expanded && (
                                 <div className="ml-6 rounded-lg border border-black/[0.06] bg-[#fafaf9] p-3 text-xs leading-relaxed whitespace-pre-wrap text-[#27272a]">
                                   {s.notes && <p className="mb-2 font-medium text-[#0f4c81]">[제출 메모] {s.notes}</p>}
-                                  {s.extracted_text ? s.extracted_text.slice(0, 2600) : '추출된 본문 없음'}
+                                  {s.extracted_text ? s.extracted_text.slice(0, 3200) : '추출된 본문 없음'}
                                 </div>
                               )}
                             </div>
@@ -1192,7 +1736,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                           {detail.board.allow_vote_change ? '마감 전 재투표 가능' : '1회 확정 변경 불가'}
                         </strong>
                       </div>
-                      {isAdmin && (
+                      {canManageBoard && (
                         <div className="flex flex-wrap items-center gap-1.5">
                           <button
                             type="button"
@@ -1214,7 +1758,13 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                       )}
                     </div>
 
-                    {showManualProposal && isAdmin && (
+                    {deadlineInfo?.expired && (
+                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-medium text-amber-900">
+                        마감일({detail.board.deadline})이 지나 투표가 자동 마감되었습니다.
+                      </div>
+                    )}
+
+                    {showManualProposal && canManageBoard && (
                       <form onSubmit={handleCreateManualProposal} className="space-y-2.5 rounded-xl border border-black/[0.1] bg-white p-4">
                         <input
                           type="text"
@@ -1255,8 +1805,8 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                         {detail.proposals.map((prop) => (
                           <div key={prop.id} className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-3">
                             <div className="flex flex-wrap items-start justify-between gap-2">
-                              <div>
-                                <div className="flex items-center gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
                                   <h3 className="text-sm font-semibold text-[#18181b]">{prop.cluster_title}</h3>
                                   <span className="chip-nowrap rounded bg-[#f7f7f5] px-2 py-0.5 text-[10.5px] font-medium text-[#52525b]">
                                     총 {prop.total_votes}표
@@ -1269,21 +1819,47 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                 </div>
                                 {prop.summary && <p className="mt-0.5 text-xs text-[#71717a]">{prop.summary}</p>}
                               </div>
-                              {isAdmin && (
-                                <button
-                                  type="button"
-                                  onClick={() => void api.stdDeleteProposal(prop.id).then(() => refreshActiveBoard())}
-                                  className="rounded p-1 text-[#a1a1aa] hover:bg-red-50 hover:text-red-600"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              )}
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                {prop.options.length >= 2 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setCompareProposal(prop)}
+                                    className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-[#fafaf9] px-2.5 py-1 text-[11px] font-semibold text-[#0f4c81] hover:bg-[#0f4c81]/5"
+                                  >
+                                    <Columns2 className="h-3.5 w-3.5" />
+                                    <span>나란히 비교</span>
+                                  </button>
+                                )}
+                                {canManageBoard && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void api.stdDeleteProposal(prop.id).then(() => refreshActiveBoard())}
+                                    title="안건 삭제"
+                                    className="rounded p-1 text-[#a1a1aa] hover:bg-red-50 hover:text-red-600"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
                             </div>
+
+                            {/* Optional 1-line Vote Rationale Input */}
+                            {prop.status === 'open' && !deadlineInfo?.expired && (
+                              <input
+                                type="text"
+                                value={voteComments[prop.id] || ''}
+                                onChange={(e) => setVoteComments({ ...voteComments, [prop.id]: e.target.value })}
+                                placeholder="투표 이유 한 줄 메모 (선택 — 입력 후 아래 '이 안 투표' 클릭 시 함께 기록)"
+                                className="w-full rounded-lg border border-black/[0.08] bg-[#fafaf9] px-3 py-1.5 text-xs text-[#18181b] outline-none focus:border-[#0f4c81]"
+                              />
+                            )}
 
                             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                               {prop.options.map((opt) => {
                                 const isMine = prop.my_vote_option_id === opt.id;
                                 const isWinner = prop.winning_option_id === opt.id;
+                                const isEditingOpt = editingOptionId === opt.id;
+                                const showVoters = expandedVotersOptId === opt.id;
                                 return (
                                   <div
                                     key={opt.id}
@@ -1308,14 +1884,94 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                         >
                                           {opt.label}
                                         </span>
-                                        <span className="text-xs font-semibold text-[#18181b]">
-                                          {opt.vote_count}표 ({opt.vote_pct}%)
-                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                          {opt.vote_count > 0 && (
+                                            <button
+                                              type="button"
+                                              onClick={() => setExpandedVotersOptId(showVoters ? '' : opt.id)}
+                                              className="text-[11px] font-semibold text-[#0f4c81] hover:underline"
+                                            >
+                                              {opt.vote_count}표 ({opt.vote_pct}%)
+                                            </button>
+                                          )}
+                                          {opt.vote_count === 0 && (
+                                            <span className="text-xs font-semibold text-[#18181b]">0표 (0%)</span>
+                                          )}
+                                          {canManageBoard && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                if (isEditingOpt) {
+                                                  setEditingOptionId('');
+                                                } else {
+                                                  setEditingOptionId(opt.id);
+                                                  setEditOptTitle(opt.title);
+                                                  setEditOptContent(opt.content_md);
+                                                }
+                                              }}
+                                              title="후보안 문구 다듬기"
+                                              className="rounded p-1 text-[#71717a] hover:bg-black/[0.06] hover:text-[#18181b]"
+                                            >
+                                              <Pencil className="h-3 w-3" />
+                                            </button>
+                                          )}
+                                        </div>
                                       </div>
-                                      <h4 className="mt-2 text-xs font-semibold text-[#18181b]">{opt.title}</h4>
-                                      <div className="mt-2 max-h-44 overflow-y-auto text-xs text-[#3f3f46]">
-                                        <MarkdownView content={opt.content_md} />
-                                      </div>
+
+                                      {isEditingOpt ? (
+                                        <div className="mt-2 space-y-2">
+                                          <input
+                                            type="text"
+                                            value={editOptTitle}
+                                            onChange={(e) => setEditOptTitle(e.target.value)}
+                                            className="w-full rounded-md border border-black/[0.12] bg-white px-2.5 py-1 text-xs font-semibold"
+                                          />
+                                          <textarea
+                                            rows={5}
+                                            value={editOptContent}
+                                            onChange={(e) => setEditOptContent(e.target.value)}
+                                            className="w-full rounded-md border border-black/[0.12] bg-white p-2 text-xs leading-relaxed"
+                                          />
+                                          <div className="flex justify-end gap-1.5">
+                                            <button
+                                              type="button"
+                                              onClick={() => setEditingOptionId('')}
+                                              className="chip-nowrap rounded-md px-2.5 py-1 text-[11px] text-[#71717a]"
+                                            >
+                                              취소
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled={busy}
+                                              onClick={() => void handleSaveOptionEdit(opt.id)}
+                                              className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#0f4c81] px-2.5 py-1 text-[11px] font-semibold text-white"
+                                            >
+                                              <Save className="h-3 w-3" />
+                                              <span>문구 저장</span>
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <>
+                                          <h4 className="mt-2 text-xs font-semibold text-[#18181b]">{opt.title}</h4>
+                                          <div className="mt-2 max-h-44 overflow-y-auto text-xs text-[#3f3f46]">
+                                            <MarkdownView content={opt.content_md} />
+                                          </div>
+                                        </>
+                                      )}
+
+                                      {showVoters && opt.voters.length > 0 && (
+                                        <div className="mt-2 space-y-1 rounded-lg border border-black/[0.06] bg-[#fafaf9] p-2 text-[11px]">
+                                          {opt.voters.map((v, vi) => (
+                                            <div key={vi} className="flex items-start justify-between gap-2 text-[#3f3f46]">
+                                              <span>
+                                                <strong className="text-[#18181b]">{v.voter_label}</strong>
+                                                {v.comment ? ` — ${v.comment}` : ''}
+                                              </span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
                                     </div>
 
                                     <div className="mt-3 space-y-2 border-t border-black/[0.06] pt-2.5">
@@ -1328,7 +1984,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                       <div className="flex items-center justify-between gap-1.5">
                                         <button
                                           type="button"
-                                          disabled={busy || prop.status !== 'open'}
+                                          disabled={busy || prop.status !== 'open' || Boolean(deadlineInfo?.expired)}
                                           onClick={() => void handleVote(prop.id, opt.id)}
                                           className={`chip-nowrap inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold transition disabled:opacity-45 ${
                                             isMine
@@ -1339,7 +1995,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                                           <Check className="h-3.5 w-3.5" />
                                           <span>{isMine ? '내 선택 완료' : '이 안 투표'}</span>
                                         </button>
-                                        {isAdmin && (
+                                        {canManageBoard && (
                                           <button
                                             type="button"
                                             disabled={busy}
@@ -1426,7 +2082,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                           다른 분류에 속하거나 양쪽에 병행·통합해야 할 파일을 AI가 기억해 두고 1클릭 실행 및 되돌리기를 지원합니다.
                         </p>
                       </div>
-                      {isAdmin && (
+                      {canManageBoard && (
                         <button
                           type="button"
                           disabled={busy}
@@ -1475,7 +2131,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                           <p className="text-[11px] text-[#8a8a8e]">
                             {m.source_board_title} → {m.target_board_title || `새 '${m.suggested_category}' 게시글 대기`}
                           </p>
-                          {isAdmin && m.status === 'pending' && (
+                          {canManageBoard && m.status === 'pending' && (
                             <div className="flex flex-wrap items-center gap-1.5 pt-1">
                               <select
                                 value={memTargetOverrides[m.id] || m.target_board_id || ''}
@@ -1484,7 +2140,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                               >
                                 <option value="">대상 게시글 선택...</option>
                                 {boards
-                                  .filter((b) => b.id !== m.source_board_id)
+                                  .filter((b) => b.id !== m.source_board_id && (isAdmin || b.can_manage))
                                   .map((b) => (
                                     <option key={b.id} value={b.id}>
                                       {b.title} ({b.category})
@@ -1497,7 +2153,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                               <button type="button" onClick={() => void handleApplyMemory(m, 'dismiss')} className="chip-nowrap rounded-md px-2 py-1 text-[11px] text-[#71717a] hover:bg-black/[0.05]">보류</button>
                             </div>
                           )}
-                          {isAdmin && (m.status === 'applied' || m.status === 'auto_applied') && (
+                          {canManageBoard && (m.status === 'applied' || m.status === 'auto_applied') && (
                             <div className="pt-1">
                               <button
                                 type="button"
@@ -1515,29 +2171,31 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                   </div>
                 )}
 
-                {/* 4. 4-ROLE EXPERT PDF PUBLISHER TAB */}
+                {/* 4. 4-ROLE EXPERT PDF/WORD/HWPX PUBLISHER TAB */}
                 {subTab === 'publish' && (
                   <div className="space-y-4">
-                    {isAdmin && (
+                    {canManageBoard && (
                       <div className="rounded-xl border border-black/[0.08] bg-[#fafaf9] p-4 space-y-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-2">
                             <Layers className="h-4 w-4 text-[#0f4c81]" />
                             <h3 className="text-xs font-semibold text-[#18181b]">
-                              4역할 전문가 위원회 정규 PDF · Word 편찬 스튜디오
+                              4역할 전문가 위원회 정규 PDF · Word · 한글(HWPX) 편찬 스튜디오
                             </h3>
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => setShowConfigModal(true)}
-                            className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#18181b] hover:bg-[#f7f7f5]"
-                          >
-                            <Stamp className="h-3 w-3 text-[#0f4c81]" />
-                            <span>표지 · 결재선 맞춤 설정</span>
-                          </button>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => setShowConfigModal(true)}
+                              className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#18181b] hover:bg-[#f7f7f5]"
+                            >
+                              <Stamp className="h-3 w-3 text-[#0f4c81]" />
+                              <span>표지 · 결재선 맞춤 설정</span>
+                            </button>
+                          )}
                         </div>
                         <p className="text-[11.5px] leading-relaxed text-[#52525b]">
-                          ① 체계·목차 설계 → ② 총회헌법·정관·시행세칙 상위 법규 위계 검수 → ③ 표준 서식·체크리스트 편집 → ④ 출판급 A4 PDF + Word(.docx) 동시 조판
+                          ① 체계·목차 설계 → ② 총회헌법·정관·시행세칙 수치·결재권자 정밀 충돌 감사 → ③ 표준 서식·체크리스트·신·구조문 대조표 편집 → ④ A4 PDF · Word(.docx) · 한글(.hwpx) 3종 동시 조판
                         </p>
                         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
                           <input
@@ -1577,15 +2235,37 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                             className="w-full rounded-lg border border-[#0f4c81]/35 bg-white px-3 py-2 text-xs"
                           />
                         )}
-                        <button
-                          type="button"
-                          disabled={compiling}
-                          onClick={() => void handleCompilePdf()}
-                          className="chip-nowrap inline-flex items-center gap-2 rounded-lg bg-[#18181b] px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-[#27272a] disabled:opacity-50"
-                        >
-                          {compiling ? <Loader2 className="h-4 w-4 animate-spin" /> : <BookCheck className="h-4 w-4" />}
-                          <span>{compiling ? '전문가 위원회 편찬 진행 중...' : '정규 행정 PDF · Word 편찬 시작'}</span>
-                        </button>
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                          <label className="flex cursor-pointer items-center gap-2 text-xs text-[#3f3f46]">
+                            <input
+                              type="checkbox"
+                              checked={compileIncludeImages}
+                              onChange={(e) => setCompileIncludeImages(e.target.checked)}
+                              className="accent-[#0f4c81]"
+                            />
+                            <span>제출된 참고 이미지(사진·양식 사본 {boardMetrics.imageCount}장)를 규정집 부록에 함께 수록</span>
+                          </label>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={compiling}
+                              onClick={() => void handleCompilePdf('draft')}
+                              className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg border border-[#0f4c81] bg-white px-3.5 py-2 text-xs font-semibold text-[#0f4c81] transition hover:bg-[#0f4c81]/5 disabled:opacity-50"
+                            >
+                              {compiling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileEdit className="h-3.5 w-3.5" />}
+                              <span>초안 먼저 검토 · 직접 편집</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={compiling}
+                              onClick={() => void handleCompilePdf('direct')}
+                              className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#18181b] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#27272a] disabled:opacity-50"
+                            >
+                              {compiling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookCheck className="h-3.5 w-3.5" />}
+                              <span>{compiling ? '전문가 위원회 편찬 중...' : '원클릭 PDF · Word · HWPX 편찬'}</span>
+                            </button>
+                          </div>
+                        </div>
 
                         {compileStages.length > 0 && (
                           <div className="space-y-1.5 rounded-lg border border-black/[0.07] bg-white p-3">
@@ -1606,126 +2286,190 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                     {/* Published Versions List */}
                     {detail.publications.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-black/[0.12] p-10 text-center text-xs text-[#8a8a8e]">
-                        아직 편찬된 정규 PDF 판본이 없습니다.
+                        아직 편찬된 정규 규정집 판본이 없습니다.
                       </div>
                     ) : (
                       <div className="space-y-3">
-                        {detail.publications.map((pub) => (
-                          <div key={pub.id} className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-3">
-                            <div className="flex flex-wrap items-start justify-between gap-2">
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="chip-nowrap rounded bg-[#18181b] px-2 py-0.5 text-[10.5px] font-bold text-white">
-                                    {pub.version_label}
-                                  </span>
-                                  <h4 className="text-sm font-semibold text-[#18181b]">{pub.title}</h4>
-                                  {pub.published_doc_id && (
-                                    <span className="chip-nowrap inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-800">
-                                      <FileCheck2 className="h-3 w-3" />
-                                      행정 Q&A 편입 완료
+                        {detail.publications.map((pub) => {
+                          const hasDiff =
+                            (pub.diff_report?.rows?.length || 0) > 0 ||
+                            (pub.committee_report.diff_change_count || 0) > 0;
+                          const hasHwpx = Boolean(pub.hwpx_path || pub.committee_report.has_hwpx);
+                          return (
+                            <div key={pub.id} className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-3">
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="chip-nowrap rounded bg-[#18181b] px-2 py-0.5 text-[10.5px] font-bold text-white">
+                                      {pub.version_label}
                                     </span>
+                                    <h4 className="text-sm font-semibold text-[#18181b]">{pub.title}</h4>
+                                    {pub.published_doc_id && (
+                                      <span className="chip-nowrap inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-800">
+                                        <FileCheck2 className="h-3 w-3" />
+                                        행정 Q&A 편입 완료
+                                      </span>
+                                    )}
+                                    {(pub.forms_registered || 0) > 0 && (
+                                      <span className="chip-nowrap inline-flex items-center gap-1 rounded bg-[#0f4c81]/10 px-2 py-0.5 text-[10.5px] font-semibold text-[#0f4c81]">
+                                        <ClipboardCheck className="h-3 w-3" />
+                                        서식 보관함 {pub.forms_registered}종 등록됨
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="mt-1 text-[11px] text-[#8a8a8e]">
+                                    편찬일: {pub.created_at.slice(0, 16).replace('T', ' ')} · {pub.committee_report.chapter_count || 0}개 장 · 표준 서식 {pub.committee_report.form_count || 0}종
+                                    {(pub.committee_report.image_count || 0) > 0 ? ` · 참고 이미지 ${pub.committee_report.image_count}장` : ''}
+                                    {' · '}PDF {Math.round((pub.committee_report.pdf_bytes || 0) / 1024)} KB
+                                    {pub.committee_report.approval_slots?.length
+                                      ? ` · 결재선: ${pub.committee_report.approval_slots.join('→')}`
+                                      : ''}
+                                  </p>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewPub(previewPub?.id === pub.id ? null : pub)}
+                                    className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-[#fafaf9] px-2.5 py-1.5 text-xs font-semibold text-[#18181b]"
+                                  >
+                                    <Eye className="h-3.5 w-3.5" />
+                                    <span>{previewPub?.id === pub.id ? '미리보기 닫기' : '미리보기'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void triggerTicketDownload(
+                                        `/api/std/publications/${pub.id}/download/pdf`,
+                                        `${pub.title}_${pub.version_label}.pdf`
+                                      )
+                                    }
+                                    className="chip-nowrap inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-xs font-semibold text-white"
+                                  >
+                                    <Download className="h-3.5 w-3.5" />
+                                    <span>정규 PDF</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void triggerTicketDownload(
+                                        `/api/std/publications/${pub.id}/download/docx`,
+                                        `${pub.title}_${pub.version_label}.docx`
+                                      )
+                                    }
+                                    className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#3f3f46]"
+                                  >
+                                    <FileText className="h-3.5 w-3.5" />
+                                    <span>Word</span>
+                                  </button>
+                                  {hasHwpx && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        void triggerTicketDownload(
+                                          `/api/std/publications/${pub.id}/download/hwpx`,
+                                          `${pub.title}_${pub.version_label}.hwpx`
+                                        )
+                                      }
+                                      className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-[#0f4c81]/30 bg-[#0f4c81]/[0.05] px-2.5 py-1.5 text-xs font-semibold text-[#0f4c81]"
+                                    >
+                                      <FileSpreadsheet className="h-3.5 w-3.5" />
+                                      <span>한글(HWPX)</span>
+                                    </button>
+                                  )}
+                                  {hasDiff && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleOpenDiffModal(pub)}
+                                      className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-semibold text-amber-900"
+                                    >
+                                      <FileDiff className="h-3.5 w-3.5" />
+                                      <span>신·구조문 대조표</span>
+                                    </button>
                                   )}
                                 </div>
-                                <p className="mt-1 text-[11px] text-[#8a8a8e]">
-                                  편찬일: {pub.created_at.slice(0, 16).replace('T', ' ')} · {pub.committee_report.chapter_count || 0}개 장 · 표준 서식 {pub.committee_report.form_count || 0}종 · PDF {Math.round((pub.committee_report.pdf_bytes || 0) / 1024)} KB
-                                  {pub.committee_report.approval_slots?.length
-                                    ? ` · 결재선: ${pub.committee_report.approval_slots.join('→')}`
-                                    : ''}
-                                </p>
                               </div>
 
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => setPreviewPub(previewPub?.id === pub.id ? null : pub)}
-                                  className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-[#fafaf9] px-2.5 py-1.5 text-xs font-semibold text-[#18181b]"
-                                >
-                                  <Eye className="h-3.5 w-3.5" />
-                                  <span>{previewPub?.id === pub.id ? '미리보기 닫기' : '미리보기'}</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void triggerTicketDownload(
-                                      `/api/std/publications/${pub.id}/download/pdf`,
-                                      `${pub.title}_${pub.version_label}.pdf`
-                                    )
-                                  }
-                                  className="chip-nowrap inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-xs font-semibold text-white"
-                                >
-                                  <Download className="h-3.5 w-3.5" />
-                                  <span>정규 PDF</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    void triggerTicketDownload(
-                                      `/api/std/publications/${pub.id}/download/docx`,
-                                      `${pub.title}_${pub.version_label}.docx`
-                                    )
-                                  }
-                                  className="chip-nowrap inline-flex items-center gap-1 rounded-lg border border-black/[0.1] bg-white px-2.5 py-1.5 text-xs font-medium text-[#3f3f46]"
-                                >
-                                  <FileText className="h-3.5 w-3.5" />
-                                  <span>Word</span>
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Law Hierarchy Audit Summary */}
-                            {pub.law_audit && pub.law_audit.length > 0 && (
-                              <div className="rounded-lg border border-black/[0.06] bg-[#fafaf9] p-3 space-y-1.5">
-                                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0f4c81]">
-                                  <ShieldCheck className="h-3.5 w-3.5" />
-                                  <span>상위 법규 위계 검수 결과 ({pub.law_audit.length}건 대조)</span>
+                              {/* v4.0 Law Hierarchy Conflict Audit Summary */}
+                              {pub.law_audit && pub.law_audit.length > 0 && (
+                                <div className="rounded-lg border border-black/[0.06] bg-[#fafaf9] p-3 space-y-1.5">
+                                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[#0f4c81]">
+                                    <ShieldCheck className="h-3.5 w-3.5" />
+                                    <span>상위 법규 위계 정밀 감사 결과 ({pub.law_audit.length}건 대조)</span>
+                                  </div>
+                                  {pub.law_audit.slice(0, 4).map((la, i) => {
+                                    const isConf = la.status.includes('충돌');
+                                    const isWarn = la.status.includes('권고') || la.status.includes('보완');
+                                    return (
+                                      <p key={i} className="flex items-start gap-1.5 text-[11px] text-[#3f3f46]">
+                                        {isConf ? (
+                                          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" />
+                                        ) : isWarn ? (
+                                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                                        ) : (
+                                          <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                                        )}
+                                        <span>
+                                          <strong className={isConf ? 'text-red-700' : isWarn ? 'text-amber-800' : 'text-[#18181b]'}>
+                                            [{la.status}] {la.source}
+                                          </strong>{' '}
+                                          — {la.note}
+                                        </span>
+                                      </p>
+                                    );
+                                  })}
                                 </div>
-                                {pub.law_audit.slice(0, 3).map((la, i) => (
-                                  <p key={i} className="text-[11px] text-[#3f3f46]">
-                                    <strong className="text-[#18181b]">[{la.status}] {la.source}</strong> — {la.note}
-                                  </p>
-                                ))}
-                              </div>
-                            )}
+                              )}
 
-                            {/* 1-Click Publish into Main Q&A Search Engine */}
-                            {isAdmin && (
-                              <div className="flex flex-wrap items-center gap-2 border-t border-black/[0.06] pt-3">
-                                <select
-                                  value={publishReplaceMap[pub.id] || ''}
-                                  onChange={(e) => setPublishReplaceMap({ ...publishReplaceMap, [pub.id]: e.target.value })}
-                                  className="min-w-0 flex-1 rounded-lg border border-black/[0.1] bg-[#fafaf9] px-2.5 py-1.5 text-xs"
-                                >
-                                  <option value="">새 공식 규정 문서로 [행정 Q&A]에 등록</option>
-                                  {qaDocuments.map((d) => (
-                                    <option key={d.id} value={d.id}>
-                                      기존 문서 개정 교체: {d.title}
-                                    </option>
-                                  ))}
-                                </select>
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => void handlePublishToQa(pub)}
-                                  className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-45"
-                                >
-                                  <FileCheck2 className="h-3.5 w-3.5" />
-                                  <span>행정 Q&A 자료실 정식 편입</span>
-                                </button>
-                              </div>
-                            )}
+                              {/* 1-Click Publish into Main Q&A Engine + 1-Click Push to Right Forms Vault */}
+                              {isAdmin && (
+                                <div className="flex flex-wrap items-center gap-2 border-t border-black/[0.06] pt-3">
+                                  <select
+                                    value={publishReplaceMap[pub.id] || ''}
+                                    onChange={(e) => setPublishReplaceMap({ ...publishReplaceMap, [pub.id]: e.target.value })}
+                                    className="min-w-0 flex-1 rounded-lg border border-black/[0.1] bg-[#fafaf9] px-2.5 py-1.5 text-xs"
+                                  >
+                                    <option value="">새 공식 규정 문서로 [행정 Q&A]에 등록</option>
+                                    {qaDocuments.map((d) => (
+                                      <option key={d.id} value={d.id}>
+                                        기존 문서 개정 교체: {d.title}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => void handlePublishToQa(pub)}
+                                    className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg bg-[#0f4c81] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#0c3d68] disabled:opacity-45"
+                                  >
+                                    <FileCheck2 className="h-3.5 w-3.5" />
+                                    <span>행정 Q&A 편입</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => void handleRegisterFormsToVault(pub)}
+                                    className="chip-nowrap inline-flex items-center gap-1.5 rounded-lg border border-[#0f4c81] bg-white px-3 py-1.5 text-xs font-semibold text-[#0f4c81] hover:bg-[#0f4c81]/5 disabled:opacity-45"
+                                  >
+                                    <ClipboardCheck className="h-3.5 w-3.5" />
+                                    <span>서식 보관함 등록</span>
+                                  </button>
+                                </div>
+                              )}
 
-                            {/* Live HTML Publication Preview Frame */}
-                            {previewPub?.id === pub.id && (
-                              <div className="overflow-hidden rounded-xl border border-black/[0.12] bg-[#f4f4f2] p-2">
-                                <iframe
-                                  title={`${pub.title} 미리보기`}
-                                  src={`/api/std/publications/${pub.id}/preview`}
-                                  className="h-[520px] w-full rounded-lg bg-white"
-                                />
-                              </div>
-                            )}
-                          </div>
-                        ))}
+                              {/* Live HTML Publication Preview Frame */}
+                              {previewPub?.id === pub.id && (
+                                <div className="overflow-hidden rounded-xl border border-black/[0.12] bg-[#f4f4f2] p-2">
+                                  <iframe
+                                    title={`${pub.title} 미리보기`}
+                                    src={`/api/std/publications/${pub.id}/preview`}
+                                    className="h-[520px] w-full rounded-lg bg-white"
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1821,7 +2565,7 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                   </select>
                 </div>
                 <div>
-                  <label className="mb-1 block text-[11.5px] font-semibold text-[#52525b]">수집 마감일 (선택)</label>
+                  <label className="mb-1 block text-[11.5px] font-semibold text-[#52525b]">수집·투표 마감일 (선택)</label>
                   <input
                     type="date"
                     value={newDeadline}
@@ -1829,6 +2573,19 @@ export const StandardizationWorkspace: React.FC<Props> = ({
                     className="w-full rounded-lg border border-black/[0.1] px-2.5 py-2 text-xs"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-[11.5px] font-semibold text-[#52525b]">목표 투표 정족수 인원 (선택 · 0이면 표시 안 함)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={500}
+                  value={newQuorumTarget}
+                  onChange={(e) => setNewQuorumTarget(Math.max(0, Number(e.target.value) || 0))}
+                  placeholder="예: 10 (교역자 10명 이상 참여 목표)"
+                  className="w-full rounded-lg border border-black/[0.1] px-3 py-1.5 text-xs"
+                />
               </div>
 
               {/* Group Visibility Scope */}
@@ -1919,6 +2676,99 @@ export const StandardizationWorkspace: React.FC<Props> = ({
           }}
           onClose={() => setShowConfigModal(false)}
         />
+      )}
+
+      {/* Side-by-Side Proposal Diff Comparator Modal */}
+      {compareProposal && (
+        <StdProposalCompareModal
+          proposal={compareProposal}
+          onClose={() => setCompareProposal(null)}
+        />
+      )}
+
+      {/* 2-Stage Manuscript Draft Editor Modal */}
+      {draftSession && (
+        <StdManuscriptEditorModal
+          versionLabel={draftSession.version_label}
+          initialManuscript={draftSession.manuscript}
+          lawAudit={draftSession.law_audit}
+          finalizing={finalizingDraft}
+          onFinalize={(edited, ver) => void handleFinalizeEditedDraft(edited, ver)}
+          onClose={() => setDraftSession(null)}
+        />
+      )}
+
+      {/* Revision 신·구조문 대조표 Modal */}
+      {diffModalState && (
+        <StdDiffModal
+          title={diffModalState.title}
+          diffReport={diffModalState.diff}
+          onClose={() => setDiffModalState(null)}
+        />
+      )}
+
+      {/* Submitted Image Lightbox Preview Modal */}
+      {lightboxSub && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-xs"
+          onClick={() => setLightboxSub(null)}
+        >
+          <div
+            className="flex max-h-[90dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-black/[0.12] bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2 border-b border-black/[0.08] bg-[#fafaf9] px-4 py-3">
+              <div className="min-w-0">
+                <h3 className="truncate text-sm font-semibold text-[#18181b]">{lightboxSub.title}</h3>
+                <p className="text-[11px] text-[#71717a]">
+                  {lightboxSub.file_name}
+                  {lightboxSub.meta?.width && lightboxSub.meta?.height
+                    ? ` · ${lightboxSub.meta.width}×${lightboxSub.meta.height}px`
+                    : ''}
+                  {lightboxSub.file_size ? ` · ${formatFileSize(lightboxSub.file_size)}` : ''}
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() =>
+                    void triggerTicketDownload(
+                      `/api/std/submissions/${encodeURIComponent(lightboxSub.id)}/file?download=1`,
+                      lightboxSub.file_name || `${lightboxSub.title}.png`
+                    )
+                  }
+                  className="chip-nowrap inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>원본 저장</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLightboxSub(null)}
+                  aria-label="닫기"
+                  className="rounded-lg p-1.5 text-[#71717a] hover:bg-black/[0.06]"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="grid flex-1 grid-cols-1 overflow-y-auto md:grid-cols-12">
+              <div className="flex items-center justify-center bg-[#f4f4f2] p-4 md:col-span-8">
+                <img
+                  src={safeAssetUrl(`/api/std/submissions/${encodeURIComponent(lightboxSub.id)}/file`)}
+                  alt={lightboxSub.title}
+                  className="max-h-[68dvh] max-w-full rounded-lg border border-black/[0.08] bg-white object-contain shadow-sm"
+                />
+              </div>
+              <div className="border-t border-black/[0.08] p-4 md:col-span-4 md:border-t-0 md:border-l">
+                <p className="mb-2 text-xs font-semibold text-[#0f4c81]">사진 글자인식(OCR) 추출 내용</p>
+                <div className="max-h-[60dvh] overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-[#27272a]">
+                  {lightboxSub.extracted_text || '추출된 텍스트가 없습니다.'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

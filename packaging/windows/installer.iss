@@ -13,8 +13,8 @@
 [Setup]
 AppId={{8D6E4921-7C31-4F92-9A0E-C81D2B4F9102}
 AppName=목포사랑의교회 행정Q&A
-AppVersion=4.1.0
-AppVerName=목포사랑의교회 행정Q&A 4.1.0
+AppVersion=4.2.0
+AppVerName=목포사랑의교회 행정Q&A 4.2.0
 AppPublisher=목포사랑의교회 행정·법규 검색 시스템
 DefaultDirName={autopf}\목포사랑의교회 행정Q&A
 DefaultGroupName=목포사랑의교회 행정Q&A

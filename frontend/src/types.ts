@@ -367,6 +367,8 @@ export interface StdBoard {
   auto_route_enabled: number;
   group_id?: string;
   group_name?: string;
+  quorum_target?: number;
+  can_manage?: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -374,6 +376,22 @@ export interface StdBoard {
   proposal_count: number;
   publication_count: number;
   pending_memory_count: number;
+}
+
+export interface StdSubmissionMeta {
+  is_image?: boolean;
+  is_pptx?: boolean;
+  width?: number;
+  height?: number;
+  format?: string;
+  ocr_applied?: boolean;
+  ocr_chars?: number;
+  slide_count?: number;
+  table_count?: number;
+  embedded_ocr_count?: number;
+  page_count?: number;
+  ocr_pages?: number;
+  sheet_count?: number;
 }
 
 export interface StdSubmission {
@@ -389,6 +407,9 @@ export interface StdSubmission {
   stored_path: string;
   extracted_text: string;
   char_len: number;
+  file_hash?: string;
+  file_size?: number;
+  meta?: StdSubmissionMeta;
   ai_summary: string;
   ai_tags: string[];
   ai_cluster_key: string;
@@ -460,6 +481,53 @@ export interface StdComment {
   created_at: string;
 }
 
+export interface StdDiffRow {
+  article: string;
+  status: '신설' | '개정' | '삭제' | string;
+  before: string;
+  after: string;
+}
+
+export interface StdDiffReport {
+  prev_version?: string;
+  curr_version?: string;
+  added_count?: number;
+  modified_count?: number;
+  removed_count?: number;
+  unchanged_count?: number;
+  rows?: StdDiffRow[];
+}
+
+export interface StdManuscriptArticle {
+  number: string;
+  title: string;
+  body: string;
+  points?: string[];
+  practical_tip?: string;
+}
+
+export interface StdManuscriptChapter {
+  title: string;
+  summary?: string;
+  articles: StdManuscriptArticle[];
+  table?: { headers: string[]; rows: string[][] };
+}
+
+export interface StdManuscriptForm {
+  title: string;
+  purpose?: string;
+  fields: string[];
+}
+
+export interface StdManuscriptDraft {
+  title: string;
+  subtitle?: string;
+  executive_summary?: string;
+  chapters: StdManuscriptChapter[];
+  standard_forms?: StdManuscriptForm[];
+  checklists?: Array<{ title: string; items: string[] }>;
+}
+
 export interface StdPublication {
   id: string;
   board_id: string;
@@ -467,6 +535,7 @@ export interface StdPublication {
   title: string;
   pdf_path: string;
   docx_path: string;
+  hwpx_path?: string;
   committee_report: {
     ai_engine?: string;
     pdf_engine?: string;
@@ -477,16 +546,22 @@ export interface StdPublication {
     comment_count?: number;
     chapter_count?: number;
     form_count?: number;
+    image_count?: number;
+    diff_change_count?: number;
     pdf_bytes?: number;
+    has_hwpx?: boolean;
   };
   law_audit: Array<{ source: string; status: string; note: string }>;
+  diff_report?: StdDiffReport;
   published_doc_id: string;
+  forms_registered?: number;
   created_by: string;
   created_at: string;
 }
 
 export interface StdBoardDetail {
   board: StdBoard;
+  can_manage?: boolean;
   submissions: StdSubmission[];
   proposals: StdProposal[];
   comments: StdComment[];

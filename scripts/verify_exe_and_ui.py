@@ -449,8 +449,8 @@ def main() -> None:
                     return await r.json();
                 }"""
             )
-            print(f"[AUDIT Engine-v4.1-EXE] {eng_status}", flush=True)
-            assert eng_status.get("version") == "4.1.0", f"Expected v4.1.0, got {eng_status}"
+            print(f"[AUDIT Engine-v4.2-EXE] {eng_status}", flush=True)
+            assert eng_status.get("version") == "4.2.0", f"Expected v4.2.0, got {eng_status}"
             assert eng_status.get("kiwi_active") is True, f"Kiwi failed to load inside frozen EXE: {eng_status}"
             assert eng_status.get("stats", {}).get("cross_refs", 0) > 500, f"Expected >500 cross_refs: {eng_status}"
             audit_geometry(dpage, "Desktop-1440x900-AiEngineSettings")
@@ -497,7 +497,7 @@ def main() -> None:
             dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
             dpage.wait_for_timeout(150)
 
-            # Switch to Administrative Standardization Studio ('표준화실') and verify clean layout + Create modal
+            # Switch to Administrative Standardization Studio ('표준화실') and verify v4.2.0 upgrades!
             dpage.click('header button:has-text("표준화실")')
             dpage.wait_for_selector("text=행정 표준화 과제", timeout=8000)
             dpage.wait_for_timeout(250)
@@ -506,11 +506,35 @@ def main() -> None:
 
             dpage.click('aside button:has-text("새 모집")')
             dpage.wait_for_selector("text=새 행정 표준화 모집 게시글 개설", timeout=5000)
+            dpage.wait_for_selector("text=목표 투표 정족수 인원", timeout=5000)
             dpage.wait_for_timeout(200)
             audit_geometry(dpage, "Desktop-1440x900-StdCreateModal")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_modal.png"))
-            dpage.click('div.fixed.inset-0.z-50 button[aria-label="닫기"]')
-            dpage.wait_for_timeout(150)
+
+            # Create a temporary test board to audit v4.2.0 Submissions (Image/PPTX multi-upload), Voting & Publish Studio!
+            dpage.fill('input[placeholder*="재정·지출결의서"]', "UI 감사 임시 표준화 과제")
+            dpage.click('button:has-text("모집 게시글 개설")')
+            dpage.wait_for_selector("text=수집 자료", timeout=8000)
+            dpage.wait_for_timeout(250)
+            accept_attr = dpage.locator('input[type="file"]').first.get_attribute("accept") or ""
+            assert ".pptx" in accept_attr and ".png" in accept_attr and ".jpg" in accept_attr, (
+                f"Expected image+pptx in accept attr, got: {accept_attr}"
+            )
+            audit_geometry(dpage, "Desktop-1440x900-StdBoardActive")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_board.png"))
+
+            # Check Publish Tab (v4.2 2-stage draft editor + HWPX 3-format compile + image appendix option)
+            dpage.click('button:has-text("전문가 PDF 편찬")')
+            dpage.wait_for_selector("text=초안 먼저 검토 · 직접 편집", timeout=5000)
+            dpage.wait_for_selector("text=원클릭 PDF · Word · HWPX 편찬", timeout=5000)
+            dpage.wait_for_timeout(200)
+            audit_geometry(dpage, "Desktop-1440x900-StdPublish")
+            dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_publish.png"))
+
+            # Clean up temporary test board so dist/ data stays pristine
+            dpage.once("dialog", lambda dialog: dialog.accept())
+            dpage.click('button[title="게시글 삭제"]')
+            dpage.wait_for_timeout(350)
 
             # Open Church Taxonomy & Approval Line Customization Modal in Standardization Studio
             dpage.click('aside button[aria-label="표준화실 규격 및 결재선 설정"]')
@@ -526,6 +550,21 @@ def main() -> None:
             audit_geometry(dpage, "Desktop-1440x900-StdConfigCover")
             dpage.screenshot(path=str(SHOT_DIR / "audit_desktop_std_cover.png"))
             d_ctx.close()
+
+            # ---- 3. Mobile Standardization Studio Audit (412 x 915) ----
+            mstd_ctx = browser.new_context(viewport={"width": 412, "height": 915}, device_scale_factor=2)
+            mspage = mstd_ctx.new_page()
+            mspage.goto(BASE_URL, wait_until="networkidle")
+            mspage.fill('input[type="password"]', "0000")
+            mspage.click('button[type="submit"]')
+            mspage.wait_for_selector("header", timeout=10000)
+            mspage.click('header button:has-text("표준화실")')
+            mspage.wait_for_selector('button[aria-label="전체 교차 분류 기억함"]', timeout=8000)
+            mspage.wait_for_selector('button[aria-label="표준화실 설정"]', timeout=5000)
+            mspage.wait_for_timeout(250)
+            audit_geometry(mspage, "Mobile-412x915-StdWorkspace")
+            mspage.screenshot(path=str(SHOT_DIR / "audit_mobile_std.png"))
+            mstd_ctx.close()
 
             browser.close()
         print("\nALL EXE + PLAYWRIGHT 412x915 & 1440x900 UI AUDITS PASSED!", flush=True)

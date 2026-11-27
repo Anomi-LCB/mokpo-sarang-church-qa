@@ -245,3 +245,85 @@ def ocr_pdf_pages(
             doc.close()
 
     return results
+
+
+def ocr_image_file(image_path: Path, max_dim: int = 2600) -> str:
+    """Run Windows WinRT Korean OCR on a standalone image file (PNG/JPG/WEBP/BMP/GIF/TIFF) with disk cache."""
+    if not image_path.exists() or not image_path.is_file():
+        return ""
+
+    cache_key = f"img_{_file_sha1(image_path)}"
+    cache_file = get_ocr_cache_dir() / f"{cache_key}.json"
+    if cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and isinstance(cached.get("text"), str):
+                return cached["text"]
+        except Exception:
+            pass
+
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        return ""
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="church_img_ocr_") as tmp:
+            tmp_dir = Path(tmp)
+            script_path = tmp_dir / "winrt_ocr_worker.ps1"
+            script_path.write_text(_PS_OCR_WORKER_SCRIPT, encoding="utf-8-sig")
+
+            norm_png = tmp_dir / "input.png"
+            with Image.open(str(image_path)) as im:
+                im = ImageOps.exif_transpose(im)
+                if getattr(im, "is_animated", False):
+                    im.seek(0)
+                gray = im.convert("L")
+                w, h = gray.size
+                # Upscale small screenshots slightly for cleaner Korean glyph recognition; cap oversized photos
+                if max(w, h) < 900 and max(w, h) > 0:
+                    scale = min(2.0, 1200.0 / float(max(w, h)))
+                    gray = gray.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+                elif max(w, h) > max_dim:
+                    scale = float(max_dim) / float(max(w, h))
+                    gray = gray.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+                gray.save(str(norm_png), format="PNG")
+
+            res = _run_ps_ocr_batch(script_path, [norm_png])
+            text = res.get(str(norm_png), "").strip()
+            try:
+                cache_file.write_text(json.dumps({"text": text}, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+            return text
+    except Exception:
+        return ""
+
+
+def ocr_image_bytes(raw_bytes: bytes, ext_hint: str = ".png") -> str:
+    """Run Windows WinRT Korean OCR on in-memory image bytes (e.g., embedded PPTX slide images)."""
+    if not raw_bytes or len(raw_bytes) < 64:
+        return ""
+    h = hashlib.sha1(raw_bytes).hexdigest()[:16]
+    cache_file = get_ocr_cache_dir() / f"imgb_{h}.json"
+    if cache_file.exists():
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and isinstance(cached.get("text"), str):
+                return cached["text"]
+        except Exception:
+            pass
+
+    suffix = ext_hint if ext_hint.startswith(".") else f".{ext_hint}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="church_imgb_ocr_") as tmp:
+            p = Path(tmp) / f"embedded{suffix}"
+            p.write_bytes(raw_bytes)
+            text = ocr_image_file(p)
+            try:
+                cache_file.write_text(json.dumps({"text": text}, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+            return text
+    except Exception:
+        return ""

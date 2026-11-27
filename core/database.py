@@ -872,6 +872,49 @@ class Database:
                 ],
             )
 
+    def upsert_document_forms(self, doc_id: str, notebook_id: str, forms: list[dict[str, Any]]) -> int:
+        if not forms:
+            return 0
+        with self.connect() as conn:
+            ts = now_iso()
+            conn.executemany(
+                """
+                INSERT INTO forms_catalog(
+                    id, doc_id, notebook_id, title, category, form_type,
+                    page_start, page_end, has_table, sample_text, fields_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    doc_id = excluded.doc_id,
+                    notebook_id = excluded.notebook_id,
+                    title = excluded.title,
+                    category = excluded.category,
+                    form_type = excluded.form_type,
+                    page_start = excluded.page_start,
+                    page_end = excluded.page_end,
+                    has_table = excluded.has_table,
+                    sample_text = excluded.sample_text,
+                    fields_json = excluded.fields_json
+                """,
+                [
+                    (
+                        f["id"],
+                        doc_id,
+                        notebook_id,
+                        f["title"],
+                        f.get("category", "표준 서식"),
+                        f.get("form_type", "form"),
+                        f["page_start"],
+                        f["page_end"],
+                        int(bool(f.get("has_table", True))),
+                        f.get("sample_text", ""),
+                        json.dumps(f.get("fields", []), ensure_ascii=False),
+                        ts,
+                    )
+                    for f in forms
+                ],
+            )
+            return len(forms)
+
     def list_forms(self, notebook_id: str, query: str = "", doc_ids: list[str] | None = None) -> list[dict[str, Any]]:
         with self.connect() as conn:
             sql = """

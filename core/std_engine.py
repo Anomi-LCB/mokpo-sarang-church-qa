@@ -8,15 +8,22 @@ from typing import Any
 
 from core.database import Database
 from core.ingest import (
+    SUPPORTED_EXTENSIONS,
     _extract_docx_pages,
     _extract_hwpx_pages,
     _extract_pdf_pages,
     _extract_txt_pages,
     _extract_xlsx_pages,
+    clean_text,
 )
+from core.ocr_winrt import ocr_image_bytes, ocr_image_file
 from core.std_config import DEFAULT_STD_CATEGORIES, load_std_config
 from core.std_store import StandardizationStore, get_std_uploads_dir
 from server.cli_providers import load_ai_config, stream_cli_with_failover
+
+IMAGE_EXTENSIONS: set[str] = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+STD_ALLOWED_EXTENSIONS: set[str] = (SUPPORTED_EXTENSIONS - {".zip"}) | IMAGE_EXTENSIONS | {".pptx"}
+MAX_STD_FILE_BYTES: int = 30 * 1024 * 1024  # 30 MB per uploaded file
 
 # Canonical church administrative taxonomy (Mokpo Sarang Church 2025 Bylaws Art. 53)
 CHURCH_ADMIN_TAXONOMY: list[tuple[str, list[str]]] = [
@@ -29,21 +36,161 @@ def _get_active_taxonomy(db: Database | None) -> list[tuple[str, list[str]]]:
     return [(str(c["name"]), list(c.get("keywords") or [])) for c in cfg.get("categories") or []] or CHURCH_ADMIN_TAXONOMY
 
 
-def extract_submission_file_text(path: Path) -> str:
+def _extract_image_submission(path: Path) -> tuple[str, dict[str, Any]]:
+    meta: dict[str, Any] = {"is_image": True, "ocr_applied": False, "width": 0, "height": 0, "format": path.suffix.lstrip(".").upper()}
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(str(path)) as im:
+            im = ImageOps.exif_transpose(im)
+            meta["width"], meta["height"] = im.size
+            if im.format:
+                meta["format"] = str(im.format).upper()
+    except Exception:
+        pass
+
+    ocr_text = clean_text(ocr_image_file(path))
+    meta["ocr_applied"] = True
+    meta["ocr_chars"] = len(ocr_text)
+    header = f"[이미지 첨부: {path.name} ({meta['width']}x{meta['height']}px)]"
+    if ocr_text:
+        return f"{header}\n{ocr_text}", meta
+    return header, meta
+
+
+def _iter_pptx_shapes_text(shapes: Any, lines_out: list[str], tables_out: list[str], image_blobs: list[tuple[bytes, str]]) -> None:
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    for shape in shapes:
+        stype = getattr(shape, "shape_type", None)
+        if stype == MSO_SHAPE_TYPE.GROUP and hasattr(shape, "shapes"):
+            _iter_pptx_shapes_text(shape.shapes, lines_out, tables_out, image_blobs)
+            continue
+
+        if getattr(shape, "has_text_frame", False) and shape.text_frame is not None:
+            for para in shape.text_frame.paragraphs:
+                txt = re.sub(r"\s+", " ", para.text or "").strip()
+                if txt:
+                    indent = "  " * min(3, int(getattr(para, "level", 0) or 0))
+                    lines_out.append(f"{indent}{txt}")
+
+        if getattr(shape, "has_table", False) and shape.table is not None:
+            rows_data: list[list[str]] = []
+            for row in shape.table.rows:
+                cells = [re.sub(r"\s+", " ", (c.text or "")).strip().replace("|", "/") for c in row.cells]
+                if any(cells):
+                    rows_data.append(cells)
+            if rows_data:
+                max_cols = max(len(r) for r in rows_data)
+                norm = [r + [""] * (max_cols - len(r)) for r in rows_data]
+                md_lines = [
+                    "| " + " | ".join(norm[0]) + " |",
+                    "| " + " | ".join("---" for _ in range(max_cols)) + " |",
+                ]
+                for r in norm[1:50]:
+                    md_lines.append("| " + " | ".join(r) + " |")
+                tables_out.append("\n".join(md_lines))
+
+        if stype == MSO_SHAPE_TYPE.PICTURE and hasattr(shape, "image"):
+            try:
+                img = shape.image
+                ext = f".{getattr(img, 'ext', 'png') or 'png'}"
+                if img.blob and len(img.blob) >= 256:
+                    image_blobs.append((img.blob, ext))
+            except Exception:
+                pass
+
+
+def _extract_pptx_submission(path: Path) -> tuple[str, dict[str, Any]]:
+    meta: dict[str, Any] = {"is_pptx": True, "slide_count": 0, "table_count": 0, "embedded_ocr_count": 0}
+    try:
+        from pptx import Presentation
+    except Exception:
+        return "", meta
+
+    prs = Presentation(str(path))
+    slide_blocks: list[str] = []
+    total_tables = 0
+    total_ocr = 0
+    max_total_ocr = 10
+
+    for idx, slide in enumerate(prs.slides, start=1):
+        lines: list[str] = []
+        tables: list[str] = []
+        img_blobs: list[tuple[bytes, str]] = []
+        _iter_pptx_shapes_text(slide.shapes, lines, tables, img_blobs)
+        total_tables += len(tables)
+
+        notes_text = ""
+        try:
+            if slide.has_notes_slide and slide.notes_slide and slide.notes_slide.notes_text_frame:
+                notes_text = clean_text(slide.notes_slide.notes_text_frame.text or "")
+        except Exception:
+            notes_text = ""
+
+        # OCR embedded slide pictures when the slide is image-heavy / scanned (< 45 chars of text)
+        ocr_parts: list[str] = []
+        plain_len = sum(len(x) for x in lines)
+        if plain_len < 45 and img_blobs and total_ocr < max_total_ocr:
+            for blob, ext in img_blobs[:2]:
+                if total_ocr >= max_total_ocr:
+                    break
+                extracted_img = clean_text(ocr_image_bytes(blob, ext_hint=ext))
+                if extracted_img:
+                    ocr_parts.append(extracted_img)
+                    total_ocr += 1
+
+        block_parts: list[str] = [f"[슬라이드 {idx}]"]
+        if lines:
+            block_parts.append(clean_text("\n".join(lines)))
+        if tables:
+            block_parts.append("\n\n".join(tables))
+        if ocr_parts:
+            block_parts.append("[슬라이드 이미지 글자인식]\n" + "\n".join(ocr_parts))
+        if notes_text:
+            block_parts.append(f"[발표자 노트]\n{notes_text}")
+
+        if len(block_parts) > 1:
+            slide_blocks.append("\n".join(block_parts))
+
+    meta["slide_count"] = len(prs.slides)
+    meta["table_count"] = total_tables
+    meta["embedded_ocr_count"] = total_ocr
+    return "\n\n".join(slide_blocks), meta
+
+
+def extract_submission_file(path: Path) -> tuple[str, dict[str, Any]]:
     ext = path.suffix.lower()
+    if ext in IMAGE_EXTENSIONS:
+        return _extract_image_submission(path)
+    if ext == ".pptx":
+        return _extract_pptx_submission(path)
+
+    meta: dict[str, Any] = {}
     if ext == ".pdf":
-        pages, _ = _extract_pdf_pages(path, ocr_dpi=200)
+        pages, ocr_cnt = _extract_pdf_pages(path, ocr_dpi=200)
+        meta = {"page_count": len(pages), "ocr_pages": ocr_cnt}
     elif ext in {".txt", ".md"}:
         pages = _extract_txt_pages(path)
+        meta = {"page_count": len(pages)}
     elif ext == ".docx":
         pages = _extract_docx_pages(path)
+        meta = {"page_count": len(pages)}
     elif ext == ".xlsx":
         pages = _extract_xlsx_pages(path)
+        meta = {"sheet_count": len(pages)}
     elif ext == ".hwpx":
         pages = _extract_hwpx_pages(path)
+        meta = {"page_count": len(pages)}
     else:
-        return ""
-    return "\n\n".join(f"[p.{p['page_no']}]\n{p['text']}" for p in pages if p.get("text", "").strip())
+        return "", meta
+    text = "\n\n".join(f"[p.{p['page_no']}]\n{p['text']}" for p in pages if p.get("text", "").strip())
+    return text, meta
+
+
+def extract_submission_file_text(path: Path) -> str:
+    text, _ = extract_submission_file(path)
+    return text
 
 
 def _heuristic_analyze(
@@ -91,7 +238,7 @@ def _heuristic_analyze(
             cluster_key = label
             break
     if not cluster_key:
-        clean_t = re.sub(r"\.(pdf|docx|hwpx|xlsx|txt|md)$", "", title, flags=re.I).strip()
+        clean_t = re.sub(r"\.(pdf|docx|hwpx|xlsx|pptx|txt|md|png|jpe?g|webp|bmp|gif|tiff?)$", "", title, flags=re.I).strip()
         clean_t = re.sub(r"\s*(수정본|최종|안|초안|v?\d+(\.\d+)?|\(\d+\))$", "", clean_t, flags=re.I).strip()
         cluster_key = clean_t[:28] or board["category"]
 
@@ -167,8 +314,9 @@ async def analyze_submission_and_cross_routes(
     submission: dict[str, Any],
     use_ai: bool = True,
 ) -> dict[str, Any]:
-    """Analyze a newly uploaded submission, detect cross-board Move/Copy/Merge/Deferred memory, and optionally auto-route."""
-    all_boards = store.list_boards()
+    """Analyze a newly uploaded submission, detect cross-board Move/Copy/Merge/Deferred memory (strictly group-isolated), and optionally auto-route."""
+    board_gid = (board.get("group_id") or "").strip()
+    all_boards = [b for b in store.list_boards() if (b.get("group_id") or "").strip() == board_gid]
     active_tax = _get_active_taxonomy(db)
     heur = _heuristic_analyze(
         board=board,
@@ -307,18 +455,28 @@ async def analyze_submission_and_cross_routes(
     }
 
 
-def rematch_deferred_memories_for_board(store: StandardizationStore, target_board: dict[str, Any]) -> list[dict[str, Any]]:
-    """When a new board is created (or rescanned), wake up matching remembered items from all other boards!"""
+def rematch_deferred_memories_for_board(
+    store: StandardizationStore,
+    target_board: dict[str, Any],
+    db: Database | None = None,
+) -> list[dict[str, Any]]:
+    """When a new board is created (or rescanned), wake up matching remembered items from same-scope boards using active church taxonomy!"""
     haystack = re.sub(
         r"\s+",
         "",
         f"{target_board['title']} {target_board['category']} {target_board['work_type']} {target_board['description']}",
     ).lower()
     board_tokens = {t for t in re.findall(r"[가-힣a-z0-9]{2,}", haystack)}
+    target_gid = (target_board.get("group_id") or "").strip()
+    active_tax = _get_active_taxonomy(db)
 
     matched: list[dict[str, Any]] = []
     all_pending = store.list_cross_memories(status="pending")
     for mem in all_pending:
+        # Strict group isolation: public <-> public, private group <-> same private group only
+        src_gid = (mem.get("source_board_group_id") or "").strip()
+        if src_gid != target_gid:
+            continue
         if mem["source_board_id"] == target_board["id"]:
             continue
         if mem["target_board_id"] == target_board["id"]:
@@ -334,13 +492,13 @@ def rematch_deferred_memories_for_board(store: StandardizationStore, target_boar
         ).lower()
         sug_tokens = {t for t in re.findall(r"[가-힣a-z0-9]{2,}", sug_text)}
 
-        # Check taxonomy overlap or direct token overlap
+        # Check taxonomy overlap or direct token overlap (respecting custom StdConfig categories!)
         overlap = board_tokens & sug_tokens
         tax_match = False
-        for cat_name, kws in CHURCH_ADMIN_TAXONOMY:
+        for cat_name, kws in active_tax:
             cat_parts = [p for p in re.split(r"[·/\s]+", cat_name) if len(p) >= 2]
-            in_board = any(p in haystack for p in cat_parts) or any(k in haystack for k in kws[:5])
-            in_mem = any(p in sug_text for p in cat_parts) or any(k in sug_text for k in kws[:5])
+            in_board = any(p in haystack for p in cat_parts) or any(k in haystack for k in kws[:6])
+            in_mem = any(p in sug_text for p in cat_parts) or any(k in sug_text for k in kws[:6])
             if in_board and in_mem:
                 tax_match = True
                 break
@@ -499,14 +657,45 @@ async def generate_voting_proposals_for_board(
         key = (s.get("ai_cluster_key") or "").strip() or board["category"]
         groups.setdefault(key, []).append(s)
 
-    existing_titles = {p["cluster_title"] for p in store.list_proposals(board["id"])}
+    existing_by_title = {p["cluster_title"]: p for p in store.list_proposals(board["id"])}
     created: list[dict[str, Any]] = []
 
-    provider_id = db.get_setting("cli_provider", "claude") or "claude"
-    failover = db.get_setting("cli_failover_enabled", "1") == "1"
+    ai_cfg = load_ai_config(db)
+    provider_id = ai_cfg.cli_provider
+    failover = ai_cfg.failover_enabled
 
     for cluster_key, items in groups.items():
-        if cluster_key in existing_titles:
+        if cluster_key in existing_by_title:
+            existing_prop = existing_by_title[cluster_key]
+            # Incremental enrichment: if newly uploaded files belong to an open proposal, append them as new candidate options!
+            if existing_prop.get("status") == "open":
+                existing_opts = existing_prop.get("options") or []
+                non_ai_opts = [o for o in existing_opts if not o.get("is_ai_improved")]
+                covered_ids: set[str] = set()
+                for o in non_ai_opts:
+                    covered_ids.update(o.get("source_submission_ids") or [])
+                uncovered = [s for s in items if s["id"] not in covered_ids]
+                if uncovered:
+                    base_idx = len(non_ai_opts)
+                    for offset, s in enumerate(uncovered[:3]):
+                        idx_next = base_idx + offset
+                        lbl = f"{chr(65 + idx_next)}안" if idx_next < 10 else f"안 {idx_next + 1}"
+                        excerpt = (s["extracted_text"] or s["notes"] or s["ai_summary"])[:1600]
+                        store.add_proposal_option(
+                            proposal_id=existing_prop["id"],
+                            label=lbl,
+                            title=f"{s['title']} (추가 원안)",
+                            content_md=(
+                                f"**제출자**: {'익명 교역자' if board.get('submission_anonymous') else s['author_label']}\n"
+                                f"**핵심 요약**: {s['ai_summary'] or s['title']}\n\n"
+                                f"{excerpt}"
+                            ),
+                            source_submission_ids=[s["id"]],
+                            is_ai_improved=False,
+                        )
+                    refreshed = store.get_proposal(existing_prop["id"])
+                    if refreshed:
+                        created.append(refreshed)
             continue
 
         options: list[dict[str, Any]] = []
@@ -542,7 +731,6 @@ async def generate_voting_proposals_for_board(
 {materials}
 """
             try:
-                ai_cfg = load_ai_config(db)
                 chunks: list[str] = []
                 async for _, c in stream_cli_with_failover(
                     provider_id, prompt, failover_enabled=failover, timeout_sec=50, ai_config=ai_cfg

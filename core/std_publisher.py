@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import html
+import io
 import json
 import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
+from xml.sax.saxutils import escape as xml_escape
 
 import docx
 from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -21,8 +26,11 @@ import pymupdf
 
 from core.config import DEFAULT_NOTEBOOK_ID
 from core.database import Database
+from core.forms import _hwpx_para, _hwpx_table
+from core.ingest import ingest_file
 from core.retriever import retrieve
 from core.std_config import DEFAULT_PDF_TEMPLATE, load_std_config, resolve_approval_preset
+from core.std_engine import IMAGE_EXTENSIONS
 from core.std_store import StandardizationStore, get_std_publications_dir
 from server.cli_providers import load_ai_config, stream_cli_with_failover
 
@@ -60,6 +68,197 @@ def _build_approval_table_html(slots: list[str], compact: bool = False) -> str:
     )
 
 
+def _collect_board_image_attachments(submissions: list[dict[str, Any]], max_images: int = 8) -> list[dict[str, Any]]:
+    """Prepare resized image previews (data URI + path) for inclusion in publication PDF/DOCX appendices."""
+    attachments: list[dict[str, Any]] = []
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        return attachments
+
+    for s in submissions:
+        if len(attachments) >= max_images:
+            break
+        sp = (s.get("stored_path") or "").strip()
+        if not sp:
+            continue
+        p = Path(sp)
+        if not p.exists() or p.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        try:
+            with Image.open(str(p)) as im:
+                im = ImageOps.exif_transpose(im)
+                if getattr(im, "is_animated", False):
+                    im.seek(0)
+                rgb = im.convert("RGB")
+                w, h = rgb.size
+                if w > 1200:
+                    nh = max(1, int(h * (1200.0 / float(w))))
+                    rgb = rgb.resize((1200, nh), Image.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                rgb.save(buf, format="JPEG", quality=84, optimize=True)
+                b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                attachments.append(
+                    {
+                        "title": s.get("title") or p.name,
+                        "file_name": s.get("file_name") or p.name,
+                        "author_label": s.get("author_label") or "",
+                        "summary": s.get("ai_summary") or "",
+                        "path": str(p),
+                        "data_uri": f"data:image/jpeg;base64,{b64}",
+                    }
+                )
+        except Exception:
+            continue
+    return attachments
+
+
+def _flatten_manuscript_articles(manuscript: dict[str, Any] | None) -> list[dict[str, str]]:
+    if not isinstance(manuscript, dict):
+        return []
+    out: list[dict[str, str]] = []
+    for ch in manuscript.get("chapters") or []:
+        ch_title = str(ch.get("title") or "")
+        for art in ch.get("articles") or []:
+            num = str(art.get("number") or "").strip()
+            title = str(art.get("title") or "").strip()
+            body = str(art.get("body") or "").strip()
+            pts = [str(x).strip() for x in (art.get("points") or []) if str(x).strip()]
+            full_text = body + ("\n" + "\n".join(f"· {x}" for x in pts) if pts else "")
+            key = re.sub(r"\s+", "", title).lower() or re.sub(r"\s+", "", num).lower()
+            out.append(
+                {
+                    "key": key,
+                    "chapter": ch_title,
+                    "label": f"{num} ({title})" if (num and title) else (num or title or "조항"),
+                    "text": full_text.strip(),
+                }
+            )
+    return out
+
+
+def build_manuscript_diff_report(
+    prev_manuscript: dict[str, Any] | None,
+    curr_manuscript: dict[str, Any],
+    prev_version: str = "",
+    curr_version: str = "",
+) -> dict[str, Any]:
+    """Generate a Korean 신·구조문 대조표 (before vs after comparison table) across manuscript revisions."""
+    if not prev_manuscript or not prev_manuscript.get("chapters"):
+        return {}
+    prev_items = _flatten_manuscript_articles(prev_manuscript)
+    curr_items = _flatten_manuscript_articles(curr_manuscript)
+    prev_map = {x["key"]: x for x in prev_items if x["key"]}
+    curr_map = {x["key"]: x for x in curr_items if x["key"]}
+
+    rows: list[dict[str, str]] = []
+    added = modified = removed = unchanged = 0
+
+    for item in curr_items:
+        k = item["key"]
+        if k not in prev_map:
+            added += 1
+            rows.append({"article": item["label"], "status": "신설", "before": "(신설)", "after": item["text"]})
+        else:
+            old = prev_map[k]
+            norm_old = re.sub(r"\s+", " ", old["text"]).strip()
+            norm_new = re.sub(r"\s+", " ", item["text"]).strip()
+            if norm_old == norm_new:
+                unchanged += 1
+            else:
+                modified += 1
+                rows.append({"article": item["label"], "status": "개정", "before": old["text"], "after": item["text"]})
+
+    for item in prev_items:
+        if item["key"] and item["key"] not in curr_map:
+            removed += 1
+            rows.append({"article": item["label"], "status": "삭제", "before": item["text"], "after": "(삭제)"})
+
+    return {
+        "prev_version": prev_version,
+        "curr_version": curr_version,
+        "added_count": added,
+        "modified_count": modified,
+        "removed_count": removed,
+        "unchanged_count": unchanged,
+        "rows": rows[:60],
+    }
+
+
+_NUM_RULE_RE = re.compile(r"(\d+(?:,\d{3})*(?:\.\d+)?\s*(?:만\s*원|억\s*원|원|일|개월|년|주|%|명|호|회)|2/3|3분의\s*2|과반수|만장일치)")
+_AUTH_TERMS = ("당회장", "당회", "제직회", "공동의회", "노회", "총회", "재정부장", "재정부", "위원장", "부서장", "지도교역자", "위임전결")
+
+
+def run_v4_law_conflict_audit(
+    db: Database,
+    board: dict[str, Any],
+    submissions: list[dict[str, Any]],
+    vote_summary: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Cross-audit draft materials against superior church laws (총회헌법 > 정관 > 시행세칙) using Engine v4.0."""
+    query_seed = (
+        f"{board['title']} {board['category']} "
+        + " ".join(v["cluster_title"] for v in vote_summary[:3])
+        + " "
+        + " ".join(s["title"] for s in submissions[:4])
+    ).strip()
+    law_retrieval = retrieve(db, DEFAULT_NOTEBOOK_ID, query_seed, None, 7)
+
+    draft_blob = "\n".join(
+        [board.get("title", ""), board.get("description", "")]
+        + [v.get("adopted_content", "") for v in vote_summary]
+        + [(s.get("notes") or "") + "\n" + (s.get("extracted_text") or "")[:1200] for s in submissions[:8]]
+    )
+    draft_nums = {re.sub(r"\s+", "", m.group(0)) for m in _NUM_RULE_RE.finditer(draft_blob)}
+    draft_auths = {t for t in _AUTH_TERMS if t in draft_blob}
+
+    law_audit: list[dict[str, Any]] = []
+    for ch in law_retrieval.chunks[:6]:
+        loc = f"p.{ch['page_start']}"
+        sec = " / ".join(x for x in (ch.get("section_path", ""), ch.get("heading", "")) if x)
+        law_text = ch.get("parent_content") or ch.get("content") or ""
+        law_nums = {re.sub(r"\s+", "", m.group(0)) for m in _NUM_RULE_RE.finditer(law_text)}
+        law_auths = {t for t in _AUTH_TERMS if t in law_text}
+
+        status = "정합 확인"
+        reasons: list[str] = []
+
+        # Compare concrete numeric rules sharing same unit (e.g., 7일 vs 3일, 2/3 vs 과반수)
+        if law_nums and draft_nums:
+            for unit in ("일", "개월", "년", "만원", "원", "%"):
+                l_u = {n for n in law_nums if n.endswith(unit)}
+                d_u = {n for n in draft_nums if n.endswith(unit)}
+                if l_u and d_u and not (l_u & d_u):
+                    status = "충돌 주의"
+                    reasons.append(
+                        f"수치·기한 차이 감지 — 상위 법규({', '.join(sorted(l_u)[:2])}) vs 초안({', '.join(sorted(d_u)[:2])})"
+                    )
+                    break
+            quorum_l = {n for n in law_nums if n in ("2/3", "3분의2", "과반수", "만장일치")}
+            quorum_d = {n for n in draft_nums if n in ("2/3", "3분의2", "과반수", "만장일치")}
+            if quorum_l and quorum_d and not (quorum_l & quorum_d):
+                status = "충돌 주의"
+                reasons.append(f"의결 정족수 차이 감지 — 상위 법규({', '.join(quorum_l)}) vs 초안({', '.join(quorum_d)})")
+
+        # Check whether superior law requires higher authority (당회/제직회/공동의회/노회) not referenced in draft
+        critical_auths = {"공동의회", "노회", "당회", "제직회", "당회장"}
+        missing_auths = (law_auths & critical_auths) - draft_auths
+        if status == "정합 확인" and missing_auths and draft_blob.strip():
+            status = "보완 권고"
+            reasons.append(f"상위 조항의 의결·결재 주체({', '.join(sorted(missing_auths)[:2])}) 명시 권장")
+
+        snippet = ch["content"][:140].replace("\n", " ").strip()
+        note_head = " · ".join(reasons) + " | " if reasons else ""
+        law_audit.append(
+            {
+                "source": f"{ch['doc_title']} ({loc})",
+                "status": status,
+                "note": f"{note_head}[{sec or '관련 조항'}] {snippet}...",
+            }
+        )
+    return law_audit
+
+
 def _render_publication_html(
     board: dict[str, Any],
     manuscript: dict[str, Any],
@@ -69,6 +268,9 @@ def _render_publication_html(
     created_by: str,
     pdf_template: dict[str, Any] | None = None,
     approval_preset: dict[str, Any] | None = None,
+    image_attachments: list[dict[str, Any]] | None = None,
+    diff_report: dict[str, Any] | None = None,
+    comments_summary: list[dict[str, Any]] | None = None,
 ) -> str:
     tpl = {**DEFAULT_PDF_TEMPLATE, **(pdf_template or {})}
     ap_preset = approval_preset or {
@@ -119,12 +321,29 @@ def _render_publication_html(
         '<tr><td class="toc-num">부록 3</td><td class="toc-title">교회 법규 위계 검수 결과 및 투표 합의 이력</td>'
         f'<td class="toc-note">{len(vote_summary)}건 합의</td></tr>'
     )
+    img_list = image_attachments or []
+    if img_list:
+        toc_rows.append(
+            f'<tr><td class="toc-num">부록 4</td><td class="toc-title">현장 참고 이미지 및 제출 서식 사본</td>'
+            f'<td class="toc-note">{len(img_list)}장</td></tr>'
+        )
+    diff_rows = (diff_report or {}).get("rows") or []
+    if diff_rows:
+        toc_rows.append(
+            f'<tr><td class="toc-num">부록 {5 if img_list else 4}</td><td class="toc-title">신·구조문 대조표 ({_esc(diff_report.get("prev_version", ""))} → {_esc(version_label)})</td>'
+            f'<td class="toc-note">{len(diff_rows)}건 변경</td></tr>'
+        )
 
     # Build Law Hierarchy Audit Rows
     audit_html_rows = []
     for item in law_audit:
         st = item.get("status", "정합")
-        badge_cls = "badge-ok" if "정합" in st or "적합" in st else "badge-warn"
+        if "충돌" in st:
+            badge_cls = "badge-conflict"
+        elif "정합" in st or "적합" in st:
+            badge_cls = "badge-ok"
+        else:
+            badge_cls = "badge-warn"
         audit_html_rows.append(
             f"<tr>"
             f'<td style="width:24%;font-weight:600;">{_esc(item.get("source", "관련 법규"))}</td>'
@@ -243,6 +462,67 @@ def _render_publication_html(
         )
     if not vote_rows_html:
         vote_rows_html.append('<tr><td colspan="3" style="text-align:center;color:#71717a;">수집된 원안 및 개선 의견을 종합하여 편찬함</td></tr>')
+
+    # Build Reference Images Appendix HTML
+    images_html = ""
+    if img_list:
+        cards = []
+        for i_idx, img in enumerate(img_list, start=1):
+            note_html = f'<p class="ref-img-note">{_esc(img["summary"])}</p>' if img.get("summary") else ""
+            cards.append(
+                f'<div class="ref-img-card">'
+                f'<div class="ref-img-cap"><strong>참고 자료 {i_idx}. {_esc(img["title"])}</strong>'
+                f' <span>({_esc(img["file_name"])})</span></div>'
+                f'<img src="{img["data_uri"]}" alt="{_esc(img["title"])}" />'
+                f"{note_html}"
+                f"</div>"
+            )
+        images_html = (
+            '<section class="chapter page-break">'
+            '<div class="chapter-header"><span class="chapter-num">APPENDIX 04</span><h2>부록 4. 현장 참고 이미지 및 제출 서식 사본</h2></div>'
+            + "".join(cards)
+            + "</section>"
+        )
+
+    # Build Revision Comparison (신·구조문 대조표) HTML
+    diff_html = ""
+    if diff_rows:
+        d_app_no = 5 if img_list else 4
+        d_trs = []
+        for dr in diff_rows:
+            st = dr.get("status", "개정")
+            bcls = "badge-ok" if st == "신설" else ("badge-conflict" if st == "삭제" else "badge-warn")
+            d_trs.append(
+                f"<tr>"
+                f'<td style="width:18%;font-weight:600;">{_esc(dr.get("article", ""))}<br/><span class="{bcls}" style="margin-top:4px;">{_esc(st)}</span></td>'
+                f'<td style="width:41%;white-space:pre-line;color:#52525b;">{_esc(dr.get("before", ""))}</td>'
+                f'<td style="width:41%;white-space:pre-line;color:#18181b;">{_esc(dr.get("after", ""))}</td>'
+                f"</tr>"
+            )
+        diff_html = (
+            '<section class="chapter page-break">'
+            f'<div class="chapter-header"><span class="chapter-num">APPENDIX 0{d_app_no}</span>'
+            f'<h2>부록 {d_app_no}. 신·구조문 대조표 ({_esc(diff_report.get("prev_version", "이전 판본"))} → {_esc(version_label)})</h2></div>'
+            f'<p class="chapter-intro">당회·제직회 보고용 개정 비교표 — 신설 {diff_report.get("added_count", 0)}건 · 개정 {diff_report.get("modified_count", 0)}건 · 삭제 {diff_report.get("removed_count", 0)}건 · 현행 유지 {diff_report.get("unchanged_count", 0)}건</p>'
+            f'<table class="data-table"><thead><tr><th>조항 / 구분</th><th>현행 ({_esc(diff_report.get("prev_version", "이전"))})</th><th>개정안 ({_esc(version_label)})</th></tr></thead>'
+            f'<tbody>{"".join(d_trs)}</tbody></table>'
+            "</section>"
+        )
+
+    # Build Improvement Comments Summary Rows for Session Report
+    cmt_rows_html = ""
+    if comments_summary:
+        c_trs = "".join(
+            f'<tr><td style="width:16%;">{_esc(c.get("kind", "개선"))}</td>'
+            f'<td style="width:18%;">{_esc(c.get("author_label", ""))}</td>'
+            f'<td>{_esc(c.get("content", ""))}</td></tr>'
+            for c in comments_summary[:15]
+        )
+        cmt_rows_html = (
+            '<h3 style="font-size:11pt;margin:18px 0 6px 0;">교역자 현장 개선 의견 반영 내역</h3>'
+            '<table class="data-table"><thead><tr><th>유형</th><th>작성자</th><th>의견 내용</th></tr></thead>'
+            f"<tbody>{c_trs}</tbody></table>"
+        )
 
     return f"""<!doctype html>
 <html lang="ko">
@@ -418,6 +698,18 @@ def _render_publication_html(
     display: inline-block; background: #fffbeb; color: #92400e;
     border: 1px solid #fde68a; border-radius: 4px; padding: 1px 7px; font-size: 8.5pt; font-weight: 700;
   }}
+  .badge-conflict {{
+    display: inline-block; background: #fef2f2; color: #991b1b;
+    border: 1px solid #fecaca; border-radius: 4px; padding: 1px 7px; font-size: 8.5pt; font-weight: 700;
+  }}
+  .ref-img-card {{
+    border: 1px solid #d4d4d8; border-radius: 6px; padding: 10px 12px; margin-bottom: 16px;
+    page-break-inside: avoid; background: #fafaf9;
+  }}
+  .ref-img-cap {{ font-size: 9.2pt; color: #18181b; margin-bottom: 8px; }}
+  .ref-img-cap span {{ color: #71717a; font-size: 8.4pt; }}
+  .ref-img-card img {{ display: block; max-width: 100%; max-height: 180mm; margin: 0 auto; border: 1px solid #e4e4e7; background: #fff; }}
+  .ref-img-note {{ margin: 8px 0 0 0; font-size: 8.5pt; color: #52525b; }}
   .chapter {{ margin-bottom: 24px; }}
   .chapter-header {{
     border-bottom: 1.5px solid #0f4c81;
@@ -582,10 +874,14 @@ def _render_publication_html(
     <table class="data-table">
       <thead><tr><th style="width:14%;">판본</th><th style="width:22%;">편찬일</th><th style="width:20%;">담당</th><th>주요 변경 및 편찬 사유</th></tr></thead>
       <tbody>
-        <tr><td>{_esc(version_label)}</td><td>{_esc(today_str)}</td><td>{_esc(created_by)}</td><td>교역자 행정 파일 수집·투표 합의·4역할 전문가 위원회 검수를 거쳐 정규 PDF 편찬</td></tr>
+        <tr><td>{_esc(version_label)}</td><td>{_esc(today_str)}</td><td>{_esc(created_by)}</td><td>교역자 행정 파일 수집·투표 합의·4역할 전문가 위원회 검수를 거쳐 정규 PDF·Word·HWPX 편찬</td></tr>
       </tbody>
     </table>
+    {cmt_rows_html}
   </section>
+
+  {images_html}
+  {diff_html}
 </body>
 </html>
 """
@@ -654,6 +950,8 @@ def _render_manuscript_docx(
     out_docx: Path,
     pdf_template: dict[str, Any] | None = None,
     approval_preset: dict[str, Any] | None = None,
+    image_attachments: list[dict[str, Any]] | None = None,
+    diff_report: dict[str, Any] | None = None,
 ) -> Path:
     tpl = {**DEFAULT_PDF_TEMPLATE, **(pdf_template or {})}
     ap_slots = list((approval_preset or {}).get("slots") or ["총무", "부장", "지도교역자", "당회장"])
@@ -776,9 +1074,246 @@ def _render_manuscript_docx(
         rr.bold = True
         rr.font.size = Pt(12)
 
+    # Reference Images Appendix in DOCX
+    if image_attachments:
+        d.add_page_break()
+        ih = d.add_heading("부록: 현장 참고 이미지 및 제출 서식 사본", level=1)
+        for r in ih.runs:
+            r.font.name = "맑은 고딕"
+        for i_idx, img in enumerate(image_attachments, start=1):
+            p_cap = d.add_paragraph(f"참고 자료 {i_idx}. {img['title']} ({img['file_name']})")
+            if p_cap.runs:
+                p_cap.runs[0].bold = True
+                p_cap.runs[0].font.name = "맑은 고딕"
+            try:
+                if Path(img["path"]).exists():
+                    d.add_picture(img["path"], width=Cm(14.0))
+            except Exception:
+                pass
+
+    # 신·구조문 대조표 in DOCX
+    diff_rows = (diff_report or {}).get("rows") or []
+    if diff_rows:
+        d.add_page_break()
+        dh = d.add_heading(f"신·구조문 대조표 ({diff_report.get('prev_version', '이전')} → {version_label})", level=1)
+        for r in dh.runs:
+            r.font.name = "맑은 고딕"
+        dtbl = d.add_table(rows=len(diff_rows) + 1, cols=3)
+        dtbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+        headers = ["조항 / 구분", f"현행 ({diff_report.get('prev_version', '이전')})", f"개정안 ({version_label})"]
+        for ci, h_txt in enumerate(headers):
+            c = dtbl.rows[0].cells[ci]
+            c.text = h_txt
+            c._tc.get_or_add_tcPr().append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="ECECE9"/>'))
+            _set_cell_border(c)
+        for ri, dr in enumerate(diff_rows, start=1):
+            dtbl.rows[ri].cells[0].text = f"{dr.get('article', '')}\n[{dr.get('status', '')}]"
+            dtbl.rows[ri].cells[1].text = dr.get("before", "")
+            dtbl.rows[ri].cells[2].text = dr.get("after", "")
+            for ci in range(3):
+                _set_cell_border(dtbl.rows[ri].cells[ci])
+
     out_docx.parent.mkdir(parents=True, exist_ok=True)
     d.save(str(out_docx))
     return out_docx
+
+
+def _render_manuscript_hwpx(
+    board: dict[str, Any],
+    manuscript: dict[str, Any],
+    law_audit: list[dict[str, Any]],
+    vote_summary: list[dict[str, Any]],
+    version_label: str,
+    out_hwpx: Path,
+    pdf_template: dict[str, Any] | None = None,
+    approval_preset: dict[str, Any] | None = None,
+    diff_report: dict[str, Any] | None = None,
+) -> Path:
+    """Create a standards-compliant KS X 6101 Hancom Hangul (.hwpx) full regulation manual."""
+    tpl = {**DEFAULT_PDF_TEMPLATE, **(pdf_template or {})}
+    ap_slots = list((approval_preset or {}).get("slots") or ["총무", "부장", "지도교역자", "당회장"])
+    denom_header = str(tpl.get("denomination_header") or "대한예수교장로회 · 목포사랑의교회 공식 행정 표준 규정집")
+    default_stmt = str(tpl.get("default_submit_statement") or "위와 같이 제출(신청)하오니 허락하여 주시기 바랍니다.")
+    default_recipient = str(tpl.get("default_recipient") or "목포사랑의교회 당회장 귀하")
+    doc_title = str(manuscript.get("title") or board["title"])
+    today_str = datetime.now().strftime("%Y년 %m월 %d일")
+
+    sec_pr_xml = (
+        '<hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" '
+        'outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">'
+        '<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/>'
+        '<hp:startNum pageStartsOn="BOTH" page="0" pic="0" tbl="0" equation="0"/>'
+        '<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>'
+        '<hp:pagePr landscape="WIDELY" width="59528" height="84188" gutterType="LEFT_ONLY">'
+        '<hp:margin header="4252" footer="4252" gutter="0" left="8504" right="8504" top="5668" bottom="4252"/>'
+        "</hp:pagePr></hp:secPr>"
+    )
+
+    body_blocks: list[str] = [
+        '<hp:p id="0" paraPrIDRef="1" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        f'<hp:run charPrIDRef="0">{sec_pr_xml}<hp:t>{xml_escape(doc_title)}</hp:t></hp:run></hp:p>',
+        _hwpx_para(f"{denom_header} · {version_label} ({today_str})", para_pr_id=1, char_pr_id=1),
+        _hwpx_para(f"적용 부서: {board['category']} | 적용 결재선: {' → '.join(ap_slots)}", para_pr_id=1, char_pr_id=1),
+        _hwpx_para("", para_pr_id=0, char_pr_id=2),
+    ]
+
+    if manuscript.get("executive_summary"):
+        body_blocks.append(_hwpx_para("[편찬 요약]", para_pr_id=0, char_pr_id=3))
+        body_blocks.append(_hwpx_para(str(manuscript["executive_summary"]), para_pr_id=0, char_pr_id=2))
+        body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+
+    # Law Audit Table
+    if law_audit:
+        body_blocks.append(_hwpx_para("[상위 법규 위계 검수 결과]", para_pr_id=0, char_pr_id=3))
+        law_rows = [["참조 상위 법규", "검수 판정", "검수 의견"]] + [
+            [str(a.get("source", "")), str(a.get("status", "정합 확인")), str(a.get("note", ""))]
+            for a in law_audit
+        ]
+        body_blocks.append(_hwpx_table(law_rows, header_row=True))
+        body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+
+    # Main Chapters
+    for c_idx, ch in enumerate(manuscript.get("chapters") or [], start=1):
+        ch_title = str(ch.get("title") or f"제{c_idx}장")
+        body_blocks.append(_hwpx_para(ch_title, para_pr_id=0, char_pr_id=0))
+        if ch.get("summary"):
+            body_blocks.append(_hwpx_para(str(ch["summary"]), para_pr_id=0, char_pr_id=1))
+        for a_idx, art in enumerate(ch.get("articles") or [], start=1):
+            head = f"{art.get('number') or f'제{a_idx}조'} ({art.get('title', '')})"
+            body_blocks.append(_hwpx_para(head, para_pr_id=0, char_pr_id=3))
+            if art.get("body"):
+                body_blocks.append(_hwpx_para(str(art["body"]), para_pr_id=0, char_pr_id=2))
+            for pt in art.get("points") or []:
+                body_blocks.append(_hwpx_para(f"  · {pt}", para_pr_id=0, char_pr_id=2))
+            if art.get("practical_tip"):
+                body_blocks.append(_hwpx_para(f"  [실무 가이드] {art['practical_tip']}", para_pr_id=0, char_pr_id=4))
+        if ch.get("table") and ch["table"].get("headers"):
+            t_rows = [list(ch["table"]["headers"])] + [list(r) for r in (ch["table"].get("rows") or [])]
+            body_blocks.append(_hwpx_table(t_rows, header_row=True))
+        body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+
+    # Standard Forms
+    for f_idx, fm in enumerate(manuscript.get("standard_forms") or [], start=1):
+        body_blocks.append(_hwpx_para(f"[부록 1] 표준 서식 제{f_idx}호: {fm.get('title', '')}", para_pr_id=0, char_pr_id=0))
+        if fm.get("purpose"):
+            body_blocks.append(_hwpx_para(str(fm["purpose"]), para_pr_id=0, char_pr_id=1))
+        ap_rows = [["결재"] + [str(s) for s in ap_slots], [""] + ["" for _ in ap_slots]]
+        body_blocks.append(_hwpx_table(ap_rows, header_row=True))
+        f_rows = [["항목", "기입 내용"]] + [[str(fld), ""] for fld in (fm.get("fields") or ["성명", "직분", "소속", "내용"])]
+        body_blocks.append(_hwpx_table(f_rows, header_row=True))
+        body_blocks.append(_hwpx_para(default_stmt, para_pr_id=1, char_pr_id=2))
+        body_blocks.append(_hwpx_para("20    년      월      일", para_pr_id=1, char_pr_id=2))
+        body_blocks.append(_hwpx_para("신청인(작성자):                    (인)", para_pr_id=2, char_pr_id=2))
+        body_blocks.append(_hwpx_para(default_recipient, para_pr_id=1, char_pr_id=3))
+        body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+
+    # Checklists
+    for ck in manuscript.get("checklists") or []:
+        body_blocks.append(_hwpx_para(f"[부록 2] {ck.get('title', '실무 점검표')}", para_pr_id=0, char_pr_id=3))
+        for it in ck.get("items") or []:
+            body_blocks.append(_hwpx_para(f"  □ {it}", para_pr_id=0, char_pr_id=2))
+        body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+
+    # Voting Consensus Summary
+    if vote_summary:
+        body_blocks.append(_hwpx_para("[부록 3] 교역자 투표 합의 요약", para_pr_id=0, char_pr_id=3))
+        v_rows = [["안건", "최종 채택안", "득표"]] + [
+            [str(v.get("cluster_title", "")), str(v.get("adopted_title", "")), f"{v.get('votes', 0)}/{v.get('total_votes', 0)}표"]
+            for v in vote_summary
+        ]
+        body_blocks.append(_hwpx_table(v_rows, header_row=True))
+        body_blocks.append(_hwpx_para("", para_pr_id=0, char_pr_id=2))
+
+    # 신·구조문 대조표
+    diff_rows = (diff_report or {}).get("rows") or []
+    if diff_rows:
+        body_blocks.append(_hwpx_para(f"[부록] 신·구조문 대조표 ({diff_report.get('prev_version', '이전')} → {version_label})", para_pr_id=0, char_pr_id=3))
+        d_rows = [["조항 / 구분", "현행", "개정안"]] + [
+            [f"{dr.get('article', '')} [{dr.get('status', '')}]", str(dr.get("before", "")), str(dr.get("after", ""))]
+            for dr in diff_rows
+        ]
+        body_blocks.append(_hwpx_table(d_rows, header_row=True))
+
+    version_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" '
+        'tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="1" buildNumber="0" os="1" xmlVersion="1.4" application="Hancom Office Hangul"/>'
+    )
+    container_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" '
+        'xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf">'
+        '<ocf:rootfiles><ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/></ocf:rootfiles></ocf:container>'
+    )
+    manifest_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>'
+    )
+    content_hpf = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<opf:package xmlns:opf="http://www.idpf.org/2007/opf/" version="" unique-identifier="" id="">'
+        f"<opf:metadata><opf:title>{xml_escape(doc_title)}</opf:title><opf:language>ko</opf:language></opf:metadata>"
+        '<opf:manifest><opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>'
+        '<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/></opf:manifest>'
+        '<opf:spine><opf:itemref idref="header" linear="yes"/><opf:itemref idref="section0" linear="yes"/></opf:spine></opf:package>'
+    )
+    header_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" '
+        'xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core" version="1.4" secCnt="1">'
+        '<hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1"/>'
+        '<hh:refList><hh:fontfaces itemCnt="1"><hh:fontface lang="HANGUL" fontCnt="1">'
+        '<hh:font id="0" face="맑은 고딕" type="TTF" isEmbedded="0"/></hh:fontface></hh:fontfaces>'
+        '<hh:borderFills itemCnt="4">'
+        '<hh:borderFill id="1" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/><hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:topBorder type="NONE" width="0.1 mm" color="#000000"/><hh:bottomBorder type="NONE" width="0.1 mm" color="#000000"/></hh:borderFill>'
+        '<hh:borderFill id="2" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="NONE" width="0.1 mm" color="#000000"/><hh:rightBorder type="NONE" width="0.1 mm" color="#000000"/>'
+        '<hh:topBorder type="NONE" width="0.1 mm" color="#000000"/><hh:bottomBorder type="NONE" width="0.1 mm" color="#000000"/></hh:borderFill>'
+        '<hh:borderFill id="3" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="SOLID" width="0.12 mm" color="#94A3B8"/><hh:rightBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:topBorder type="SOLID" width="0.12 mm" color="#94A3B8"/><hh:bottomBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hc:fillBrush><hc:winBrush faceColor="#FFFFFF" hatchColor="#999999" alpha="0"/></hc:fillBrush></hh:borderFill>'
+        '<hh:borderFill id="4" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0">'
+        '<hh:leftBorder type="SOLID" width="0.12 mm" color="#94A3B8"/><hh:rightBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hh:topBorder type="SOLID" width="0.12 mm" color="#94A3B8"/><hh:bottomBorder type="SOLID" width="0.12 mm" color="#94A3B8"/>'
+        '<hc:fillBrush><hc:winBrush faceColor="#EEF2F7" hatchColor="#999999" alpha="0"/></hc:fillBrush></hh:borderFill>'
+        '</hh:borderFills>'
+        '<hh:charProperties itemCnt="5">'
+        '<hh:charPr id="0" height="1450" textColor="#0F172A" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:bold/></hh:charPr>'
+        '<hh:charPr id="1" height="850" textColor="#64748B" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/></hh:charPr>'
+        '<hh:charPr id="2" height="1000" textColor="#1E293B" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/></hh:charPr>'
+        '<hh:charPr id="3" height="1050" textColor="#0F172A" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/><hh:bold/></hh:charPr>'
+        '<hh:charPr id="4" height="920" textColor="#0F4C81" shadeColor="none" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0"/></hh:charPr>'
+        '</hh:charProperties>'
+        '<hh:paraProperties itemCnt="3">'
+        '<hh:paraPr id="0" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0"><hh:align horizontal="LEFT" vertical="BASELINE"/><hh:lineSpacing type="PERCENT" value="150" unit="HWPUNIT"/></hh:paraPr>'
+        '<hh:paraPr id="1" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0"><hh:align horizontal="CENTER" vertical="BASELINE"/><hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/></hh:paraPr>'
+        '<hh:paraPr id="2" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0"><hh:align horizontal="RIGHT" vertical="BASELINE"/><hh:lineSpacing type="PERCENT" value="150" unit="HWPUNIT"/></hh:paraPr>'
+        '</hh:paraProperties>'
+        '<hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="2" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles>'
+        "</hh:refList></hh:head>"
+    )
+    section0_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" '
+        'xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" '
+        'xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">'
+        + "".join(body_blocks)
+        + "</hs:sec>"
+    )
+
+    out_hwpx.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(str(out_hwpx), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/hwp+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("version.xml", version_xml.encode("utf-8"))
+        zf.writestr("META-INF/container.xml", container_xml.encode("utf-8"))
+        zf.writestr("META-INF/manifest.xml", manifest_xml.encode("utf-8"))
+        zf.writestr("Contents/content.hpf", content_hpf.encode("utf-8"))
+        zf.writestr("Contents/header.xml", header_xml.encode("utf-8"))
+        zf.writestr("Contents/section0.xml", section0_xml.encode("utf-8"))
+    return out_hwpx
 
 
 def _build_offline_manuscript(
@@ -926,25 +1461,17 @@ def _build_offline_manuscript(
     }
 
 
-async def stream_committee_compile(
+async def generate_committee_draft_stream(
     db: Database,
     store: StandardizationStore,
     board: dict[str, Any],
     version_label: str = "",
     custom_directives: str = "",
-    created_by: str = "관리자",
     approval_preset_id: str = "",
     custom_approval_slots: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """
-    4-Role Expert Committee AI Compilation Pipeline:
-      Stage 1: Structure & TOC Architect
-      Stage 2: Church Law Hierarchy Auditor (cross-checks real 총회헌법·정관·시행세칙 via RAG!)
-      Stage 3: Administrative Forms & Checklist Designer
-      Stage 4: Chief Editor Polish + Vector A4 HTML->PDF & DOCX Typesetting
-    """
+    """Run Stages 1-3 of the 4-Role Expert Committee and yield an editable manuscript draft before final typesetting."""
     std_cfg = load_std_config(db)
-    pdf_template = std_cfg.get("pdf_template") or DEFAULT_PDF_TEMPLATE
     approval_preset = resolve_approval_preset(
         std_cfg,
         board_category=board.get("category", ""),
@@ -962,7 +1489,6 @@ async def stream_committee_compile(
     if not version_label.strip():
         version_label = f"v1.{len(existing_pubs)}"
 
-    # Build concise voting consensus summary
     vote_summary: list[dict[str, Any]] = []
     for p in proposals:
         opts = p.get("options") or []
@@ -982,47 +1508,35 @@ async def stream_committee_compile(
             }
         )
 
-    # ---- STAGE 1: Architecture & Consensus Analysis ----
+    # ---- STAGE 1 ----
     yield {
         "event": "stage",
         "stage": 1,
         "role": "체계·목차 설계 전문가",
         "message": f"제출 자료 {len(submissions)}건·투표 합의 {len(vote_summary)}건·개선 의견 {len(comments)}건을 종합하여 장·절·조 체계를 설계 중...",
     }
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.04)
 
-    # ---- STAGE 2: Real RAG Cross-Audit against Church Constitution / Bylaws / Rules ----
+    # ---- STAGE 2: Real Engine v4.0 Law Hierarchy & Conflict Audit ----
     yield {
         "event": "stage",
         "stage": 2,
-        "role": "교회 법규 위계 검수 전문가",
-        "message": "총회헌법 · 목포사랑의교회 정관 · 2025년 시행세칙 원문과 교차 대조하여 상위 법규 충돌 여부를 검수 중...",
+        "role": "교회 법규 위계 검수 전문가 (v4.0)",
+        "message": "총회헌법 · 목포사랑의교회 정관 · 2025년 시행세칙 원문과 수치·기한·결재권자를 정밀 교차 감사 중...",
     }
+    law_audit = await asyncio.to_thread(run_v4_law_conflict_audit, db, board, submissions, vote_summary)
 
-    query_seed = f"{board['title']} {board['category']} " + " ".join(s["title"] for s in submissions[:4])
-    law_retrieval = await asyncio.to_thread(retrieve, db, DEFAULT_NOTEBOOK_ID, query_seed, None, 6)
-    law_audit: list[dict[str, Any]] = []
-    for ch in law_retrieval.chunks[:5]:
-        loc = f"p.{ch['page_start']}"
-        sec = " / ".join(x for x in (ch.get("section_path", ""), ch.get("heading", "")) if x)
-        law_audit.append(
-            {
-                "source": f"{ch['doc_title']} ({loc})",
-                "status": "정합 확인",
-                "note": f"[{sec or '관련 조항'}] {ch['content'][:150].replace(chr(10), ' ')}...",
-            }
-        )
-
-    # ---- STAGE 3: 4-Role Expert Committee AI Synthesis ----
+    # ---- STAGE 3: 4-Role AI Committee Synthesis ----
     yield {
         "event": "stage",
         "stage": 3,
         "role": "실무 서식·표 편집 전문가 & 최종 교정 편집장",
-        "message": "4인 전문가 위원회(구조설계·법규검수·서식편집·교정편집장) 합의로 출판용 원고와 표준 서식을 집필 중...",
+        "message": "4인 전문가 위원회(구조설계·법규검수·서식편집·교정편집장) 합의로 출판용 원고 초안과 표준 서식을 집필 중...",
     }
 
-    provider_id = db.get_setting("cli_provider", "claude") or "claude"
-    failover = db.get_setting("cli_failover_enabled", "1") == "1"
+    ai_cfg = load_ai_config(db)
+    provider_id = ai_cfg.cli_provider
+    failover = ai_cfg.failover_enabled
 
     materials_text = "\n\n".join(
         f"[제출물 {i + 1}: {s['title']} ({s['file_name'] or '직접작성'})]\n"
@@ -1034,7 +1548,7 @@ async def stream_committee_compile(
         for v in vote_summary
     )
     comments_text = "\n".join(f"- ({c['kind']}) {c['content'][:240]}" for c in comments[:12])
-    law_text = "\n".join(f"- {a['source']}: {a['note']}" for a in law_audit)
+    law_text = "\n".join(f"- [{a['status']}] {a['source']}: {a['note']}" for a in law_audit)
 
     prompt = f"""당신은 목포사랑의교회 행정표준화위원회(① 체계·목차 설계 전문가, ② 교회 법규 위계 검수 전문가, ③ 실무 서식·표 편집자, ④ 최종 교정 편집장)입니다.
 수십 명의 행정·법규 전문가가 모여 완성한 수준의 **공식 정규 행정 표준 규정집 JSON 원고**를 작성하세요.
@@ -1055,7 +1569,7 @@ async def stream_committee_compile(
 [교역자 개선 의견]
 {comments_text or '(별도 개선 의견 없음)'}
 
-[참조 상위 법규 (총회헌법 · 정관 · 시행세칙)]
+[참조 상위 법규 정밀 감사 (총회헌법 · 정관 · 시행세칙)]
 {law_text or '(기본 정관·시행세칙 준수)'}
 
 [출력 규칙 — 반드시 아래 순수 JSON 객체만 출력]
@@ -1064,7 +1578,7 @@ async def stream_committee_compile(
   "subtitle": "부제목",
   "executive_summary": "본 규정집의 편찬 목적과 핵심 표준화 요약 (2~3문장)",
   "law_audit_notes": [
-    {{"source": "상위 법규명(조항/쪽수)", "status": "정합 또는 보완권고", "note": "검수 의견"}}
+    {{"source": "상위 법규명(조항/쪽수)", "status": "정합 확인 | 보완 권고 | 충돌 주의", "note": "검수 의견"}}
   ],
   "chapters": [
     {{
@@ -1098,7 +1612,6 @@ async def stream_committee_compile(
 }}
 """
 
-    ai_cfg = load_ai_config(db)
     manuscript: dict[str, Any] | None = None
     used_engine = "offline-committee"
     try:
@@ -1123,13 +1636,66 @@ async def stream_committee_compile(
         manuscript = _build_offline_manuscript(board, submissions, proposals, comments, law_audit)
         used_engine = "offline-committee"
 
-    # ---- STAGE 4: A4 Publication PDF + Word DOCX Typesetting ----
     yield {
-        "event": "stage",
-        "stage": 4,
-        "role": "출판 조판 엔진",
-        "message": "표지 · 목차 · 법규 검수표 · 표준 서식 양식을 포함한 출판급 A4 정규 PDF 및 Word(.docx) 파일을 조판 중...",
+        "event": "draft",
+        "version_label": version_label,
+        "manuscript": manuscript,
+        "law_audit": law_audit,
+        "vote_summary": vote_summary,
+        "approval_preset": approval_preset,
+        "ai_engine": used_engine,
     }
+
+
+async def typeset_manuscript_to_publication(
+    db: Database,
+    store: StandardizationStore,
+    board: dict[str, Any],
+    manuscript: dict[str, Any],
+    law_audit: list[dict[str, Any]],
+    vote_summary: list[dict[str, Any]],
+    version_label: str,
+    created_by: str = "관리자",
+    approval_preset_id: str = "",
+    custom_approval_slots: list[str] | None = None,
+    ai_engine: str = "edited-manuscript",
+    include_images: bool = True,
+) -> dict[str, Any]:
+    """Typeset any AI-generated or human-edited manuscript into A4 PDF + DOCX + HWPX + Revision Diff Report."""
+    std_cfg = load_std_config(db)
+    pdf_template = std_cfg.get("pdf_template") or DEFAULT_PDF_TEMPLATE
+    approval_preset = resolve_approval_preset(
+        std_cfg,
+        board_category=board.get("category", ""),
+        preset_id=approval_preset_id,
+        custom_slots=custom_approval_slots,
+    )
+    approval_slots = list(approval_preset.get("slots") or ["총무", "부장", "지도교역자", "당회장"])
+
+    submissions = store.list_submissions(board["id"], include_archived=False)
+    proposals = store.list_proposals(board["id"])
+    comments = store.list_comments(board["id"])
+    existing_pubs = store.list_publications(board["id"])
+    if not version_label.strip():
+        version_label = f"v1.{len(existing_pubs)}"
+
+    prev_pub = store.get_latest_publication(board["id"])
+    diff_report = (
+        build_manuscript_diff_report(
+            prev_pub.get("manuscript") if prev_pub else None,
+            manuscript,
+            prev_version=prev_pub.get("version_label", "") if prev_pub else "",
+            curr_version=version_label,
+        )
+        if prev_pub
+        else {}
+    )
+
+    image_attachments = (
+        await asyncio.to_thread(_collect_board_image_attachments, submissions)
+        if include_images
+        else []
+    )
 
     pub_html = _render_publication_html(
         board=board,
@@ -1140,6 +1706,9 @@ async def stream_committee_compile(
         created_by=created_by,
         pdf_template=pdf_template,
         approval_preset=approval_preset,
+        image_attachments=image_attachments,
+        diff_report=diff_report,
+        comments_summary=comments,
     )
 
     pub_dir = get_std_publications_dir(board["id"])
@@ -1147,6 +1716,7 @@ async def stream_committee_compile(
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     pdf_path = pub_dir / f"{safe_title}_{version_label}_{stamp}.pdf"
     docx_path = pub_dir / f"{safe_title}_{version_label}_{stamp}.docx"
+    hwpx_path = pub_dir / f"{safe_title}_{version_label}_{stamp}.hwpx"
 
     pdf_engine = await asyncio.to_thread(_render_html_to_pdf, pub_html, pdf_path)
     await asyncio.to_thread(
@@ -1159,10 +1729,24 @@ async def stream_committee_compile(
         docx_path,
         pdf_template,
         approval_preset,
+        image_attachments,
+        diff_report,
+    )
+    await asyncio.to_thread(
+        _render_manuscript_hwpx,
+        board,
+        manuscript,
+        law_audit,
+        vote_summary,
+        version_label,
+        hwpx_path,
+        pdf_template,
+        approval_preset,
+        diff_report,
     )
 
     committee_report = {
-        "ai_engine": used_engine,
+        "ai_engine": ai_engine,
         "pdf_engine": pdf_engine,
         "approval_preset_name": approval_preset.get("name", ""),
         "approval_slots": approval_slots,
@@ -1171,7 +1755,10 @@ async def stream_committee_compile(
         "comment_count": len(comments),
         "chapter_count": len(manuscript.get("chapters") or []),
         "form_count": len(manuscript.get("standard_forms") or []),
+        "image_count": len(image_attachments),
+        "diff_change_count": len(diff_report.get("rows") or []),
         "pdf_bytes": pdf_path.stat().st_size if pdf_path.exists() else 0,
+        "has_hwpx": hwpx_path.exists(),
     }
 
     pub = store.create_publication(
@@ -1180,13 +1767,164 @@ async def stream_committee_compile(
         title=manuscript.get("title") or board["title"],
         pdf_path=str(pdf_path),
         docx_path=str(docx_path),
+        hwpx_path=str(hwpx_path),
         html_snapshot=pub_html,
         committee_report=committee_report,
         law_audit=law_audit,
         created_by=created_by,
+        manuscript=manuscript,
+        diff_report=diff_report,
+    )
+    return pub
+
+
+async def stream_committee_compile(
+    db: Database,
+    store: StandardizationStore,
+    board: dict[str, Any],
+    version_label: str = "",
+    custom_directives: str = "",
+    created_by: str = "관리자",
+    approval_preset_id: str = "",
+    custom_approval_slots: list[str] | None = None,
+    include_images: bool = True,
+) -> AsyncIterator[dict[str, Any]]:
+    """
+    1-Click 4-Role Expert Committee AI Compilation Pipeline:
+      Stage 1: Structure & TOC Architect
+      Stage 2: Engine v4.0 Church Law Hierarchy Conflict Auditor
+      Stage 3: Administrative Forms & Chief Editor Polish
+      Stage 4: A4 PDF + Word(.docx) + Hangul(.hwpx) + 신·구조문 대조표 Typesetting
+    """
+    draft_payload: dict[str, Any] | None = None
+    async for ev in generate_committee_draft_stream(
+        db=db,
+        store=store,
+        board=board,
+        version_label=version_label,
+        custom_directives=custom_directives,
+        approval_preset_id=approval_preset_id,
+        custom_approval_slots=custom_approval_slots,
+    ):
+        if ev.get("event") == "draft":
+            draft_payload = ev
+        else:
+            yield ev
+
+    assert draft_payload is not None
+
+    yield {
+        "event": "stage",
+        "stage": 4,
+        "role": "출판 조판 엔진 (PDF · Word · HWPX)",
+        "message": "표지 · 목차 · v4.0 법규 감사표 · 표준 서식 · 신·구조문 대조표를 포함한 PDF · Word(.docx) · 한글(.hwpx) 3종 파일을 조판 중...",
+    }
+
+    pub = await typeset_manuscript_to_publication(
+        db=db,
+        store=store,
+        board=board,
+        manuscript=draft_payload["manuscript"],
+        law_audit=draft_payload["law_audit"],
+        vote_summary=draft_payload["vote_summary"],
+        version_label=draft_payload["version_label"],
+        created_by=created_by,
+        approval_preset_id=approval_preset_id,
+        custom_approval_slots=custom_approval_slots,
+        ai_engine=draft_payload.get("ai_engine", "offline-committee"),
+        include_images=include_images,
     )
 
     yield {
         "event": "done",
-        "publication": {k: v for k, v in pub.items() if k != "html_snapshot"},
+        "publication": {k: v for k, v in pub.items() if k not in ("html_snapshot", "manuscript")},
     }
+
+
+def register_publication_forms_to_vault(
+    db: Database,
+    store: StandardizationStore,
+    pub: dict[str, Any],
+    notebook_id: str = DEFAULT_NOTEBOOK_ID,
+) -> dict[str, Any]:
+    """1-Click register all standard forms from a compiled publication directly into the right-side Forms Vault!"""
+    pdf_path = Path(pub.get("pdf_path") or "")
+    if not pdf_path.exists():
+        raise ValueError("편찬된 PDF 파일을 찾을 수 없습니다.")
+
+    board = store.get_board(pub["board_id"])
+    cat_label = (board["category"] if board else "표준 서식")
+
+    # Ensure the compiled PDF exists as a document in the target notebook so Forms Vault downloads/previews work natively
+    doc_id = (pub.get("published_doc_id") or "").strip()
+    existing_doc = db.get_document(doc_id) if doc_id else None
+    if not existing_doc:
+        ingested = ingest_file(
+            db=db,
+            notebook_id=notebook_id or DEFAULT_NOTEBOOK_ID,
+            source_path=pdf_path,
+            title=f"{pub['title']} ({pub['version_label']})",
+            category=cat_label,
+            priority=85,
+        )
+        existing_doc = ingested[0]
+        doc_id = existing_doc["id"]
+        store.mark_publication_linked_doc(pub["id"], doc_id)
+
+    manuscript = pub.get("manuscript") or {}
+    std_forms = manuscript.get("standard_forms") or []
+    if not std_forms:
+        std_forms = [
+            {
+                "title": f"{pub['title']} 표준 서식",
+                "purpose": f"{cat_label} 공식 행정 표준 양식",
+                "fields": ["작성일", "소속 부서", "성명 / 직분", "연락처", "내용 및 사유"],
+            }
+        ]
+
+    # Locate exact 1-based page number of each standard form inside the compiled PDF
+    page_texts: list[str] = []
+    pdf_doc = pymupdf.open(str(pdf_path))
+    try:
+        for i in range(len(pdf_doc)):
+            page_texts.append(pdf_doc[i].get_text("text") or "")
+    finally:
+        pdf_doc.close()
+
+    total_pages = max(1, len(page_texts))
+    form_entries: list[dict[str, Any]] = []
+    for idx, fm in enumerate(std_forms, start=1):
+        f_title = str(fm.get("title") or f"{pub['title']} 표준 서식 제{idx}호").strip()
+        f_fields = [str(x).strip() for x in (fm.get("fields") or []) if str(x).strip()]
+        f_purpose = str(fm.get("purpose") or "").strip()
+
+        matched_page = total_pages
+        marker = f"표준 서식 제{idx}호"
+        for p_idx, ptxt in enumerate(page_texts, start=1):
+            if marker in ptxt or (len(f_title) >= 4 and f_title in ptxt):
+                matched_page = p_idx
+                break
+
+        fid = "std_frm_" + hashlib.sha1(f"{pub['id']}:{idx}:{f_title}".encode("utf-8")).hexdigest()[:12]
+        sample_lines = [f_title]
+        if f_purpose:
+            sample_lines.append(f"용도: {f_purpose}")
+        for fld in f_fields:
+            sample_lines.append(f"{fld}: ")
+        form_entries.append(
+            {
+                "id": fid,
+                "title": f"{f_title} ({pub['version_label']})",
+                "category": f"표준 서식 · {cat_label}",
+                "form_type": "form",
+                "page_start": matched_page,
+                "page_end": matched_page,
+                "has_table": True,
+                "sample_text": "\n".join(sample_lines),
+                "fields": f_fields or ["작성일", "성명", "직분", "소속", "내용"],
+            }
+        )
+
+    count = db.upsert_document_forms(doc_id, existing_doc["notebook_id"], form_entries)
+    store.mark_publication_forms_registered(pub["id"], count)
+    return {"document": existing_doc, "registered_count": count, "forms": form_entries}

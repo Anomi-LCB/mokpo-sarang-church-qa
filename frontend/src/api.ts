@@ -25,7 +25,11 @@ import type {
   StdComment,
   StdConfig,
   StdCrossMemory,
+  StdDiffReport,
+  StdManuscriptDraft,
   StdProposal,
+  StdProposalOption,
+  StdPublication,
   StdSubmission,
   StructuredFormDraft,
   UpdateCheckResponse,
@@ -645,6 +649,7 @@ export const api = {
     allow_vote_change: boolean;
     auto_route_enabled: boolean;
     group_id?: string;
+    quorum_target?: number;
   }) =>
     reqJson<StdBoard & { matched_memories?: StdCrossMemory[] }>('/api/std/boards', {
       method: 'POST',
@@ -664,11 +669,21 @@ export const api = {
     fd.append('notes', payload.notes);
     fd.append('use_ai', payload.use_ai === false ? 'false' : 'true');
     if (payload.file) fd.append('file', payload.file);
-    return reqJson<{ ok: boolean; submission: StdSubmission; analysis: { memories: StdCrossMemory[]; auto_applied_count: number } }>(
-      `/api/std/boards/${encodeURIComponent(boardId)}/submissions`,
-      { method: 'POST', body: fd }
-    );
+    return reqJson<{
+      ok: boolean;
+      submission: StdSubmission;
+      duplicate_of?: { id: string; title: string; file_name: string } | null;
+      analysis: { memories: StdCrossMemory[]; auto_applied_count: number };
+    }>(`/api/std/boards/${encodeURIComponent(boardId)}/submissions`, { method: 'POST', body: fd });
   },
+  stdUpdateSubmission: (
+    subId: string,
+    payload: { title?: string; notes?: string; ai_cluster_key?: string; reanalyze?: boolean; use_ai?: boolean }
+  ) =>
+    reqJson<{ ok: boolean; submission: StdSubmission }>(`/api/std/submissions/${encodeURIComponent(subId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
   stdDeleteSubmission: (subId: string) =>
     reqJson<{ ok: boolean }>(`/api/std/submissions/${encodeURIComponent(subId)}`, { method: 'DELETE' }),
   stdListCrossMemories: (boardId = '', status = '') => {
@@ -723,6 +738,17 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+  stdUpdateProposalOption: (
+    optionId: string,
+    payload: { label?: string; title?: string; content_md?: string }
+  ) =>
+    reqJson<{ ok: boolean; option: StdProposalOption }>(
+      `/api/std/proposal-options/${encodeURIComponent(optionId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }
+    ),
   stdDeleteProposal: (proposalId: string) =>
     reqJson<{ ok: boolean }>(`/api/std/proposals/${encodeURIComponent(proposalId)}`, { method: 'DELETE' }),
   stdAddComment: (
@@ -733,6 +759,35 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  stdFinalizeManuscript: (
+    boardId: string,
+    payload: {
+      version_label?: string;
+      manuscript: StdManuscriptDraft;
+      law_audit: Array<{ source: string; status: string; note: string }>;
+      vote_summary: Array<Record<string, unknown>>;
+      approval_preset_id?: string;
+      custom_approval_slots?: string[];
+      ai_engine?: string;
+      include_images?: boolean;
+    }
+  ) =>
+    reqJson<{ ok: boolean; publication: StdPublication }>(
+      `/api/std/boards/${encodeURIComponent(boardId)}/compile/finalize`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+  stdGetPublicationDiff: (pubId: string) =>
+    reqJson<{
+      id: string;
+      version_label: string;
+      title: string;
+      diff_report: StdDiffReport;
+      manuscript: StdManuscriptDraft;
+      law_audit: Array<{ source: string; status: string; note: string }>;
+    }>(`/api/std/publications/${encodeURIComponent(pubId)}/diff`),
   stdPublishToQa: (
     pubId: string,
     payload: { notebook_id?: string; replace_doc_id?: string; title?: string; category?: string; priority?: number }
@@ -741,4 +796,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  stdRegisterPublicationForms: (pubId: string, notebookId = 'mokpo-sarang-church') =>
+    reqJson<{ ok: boolean; document: DocumentItem; registered_count: number }>(
+      `/api/std/publications/${encodeURIComponent(pubId)}/register-forms`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ notebook_id: notebookId }),
+      }
+    ),
 };
