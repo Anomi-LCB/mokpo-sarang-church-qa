@@ -156,12 +156,35 @@ def test_windows_installer_is_uac_free_personal_app_and_launcher_exits_cleanly()
             assert "Types: custom" in line and "full" not in line
 
     launcher = (root / "packaging" / "windows" / "launcher.py").read_text(encoding="utf-8")
-    assert 'get_setting("keep_tray_on_close", "0") == "1"' in launcher
-    assert "should_hide_on_close=_get_keep_tray_on_close" in launcher
+    assert "--server-worker" in launcher
+    assert "_patch_edgechromium_deadlock_free" in launcher
+    assert "RemoveWebResourceRequestedFilter" in launcher
+    assert "win.events.loaded" not in launcher
     assert "_show_startup_failed_dialog" in launcher
-    assert "not server_thread.is_alive()" in launcher
     assert "timeout_graceful_shutdown=2" in launcher
-    assert "server_thread.join(timeout=3.0)" in launcher
+    assert "_request_worker_shutdown" in launcher
+
+
+def test_internal_desktop_prefs_and_shutdown_loopback_only(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CHURCH_SEARCH_DATA_DIR", str(tmp_path / "data"))
+    shutdown_called = {"count": 0}
+    app = create_app(
+        db_path=tmp_path / "data" / "internal.db",
+        on_shutdown=lambda: shutdown_called.__setitem__("count", shutdown_called["count"] + 1),
+    )
+
+    with TestClient(app, client=("192.168.0.50", 51400)) as remote:
+        assert remote.get("/api/internal/desktop-prefs").status_code == 403
+        assert remote.post("/api/internal/shutdown").status_code == 403
+
+    with TestClient(app, client=("127.0.0.1", 51401)) as local:
+        assert local.get("/api/internal/desktop-prefs", headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 403
+        prefs = local.get("/api/internal/desktop-prefs").json()
+        assert prefs["ok"] is True
+        assert prefs["keep_tray_on_close"] is False
+        assert prefs["local_auto_login"] is True
+        res = local.post("/api/internal/shutdown").json()
+        assert res["ok"] is True and res["shutting_down"] is True
 
 
 def test_database_auto_heals_corrupted_db_from_backup_and_fresh_fallback(tmp_path: Path) -> None:

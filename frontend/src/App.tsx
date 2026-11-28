@@ -336,6 +336,8 @@ export function App() {
 
   useEffect(() => {
     if (!auth?.authenticated || isOfflineMode) return;
+    // Skip external GitHub update check when PC is completely offline (zero network wait)
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     let cancelled = false;
     // Defer update check so startup render & first interaction stay 100% snag-free
     const timer = window.setTimeout(() => {
@@ -412,7 +414,11 @@ export function App() {
   }, []);
 
   const checkAuth = useCallback(async () => {
-    const cachedList = await listOfflineBundles();
+    // Guard IndexedDB lookup with a short timeout so corrupted browser storage can NEVER hang startup
+    const cachedList = await Promise.race<OfflineBundle[]>([
+      listOfflineBundles().catch(() => []),
+      new Promise<OfflineBundle[]>((resolve) => window.setTimeout(() => resolve([]), 1500)),
+    ]);
     const cachedDefault =
       cachedList.find((b) => b.notebook.id === 'mokpo-sarang-church') || cachedList[0] || null;
     if (cachedDefault) {
@@ -420,27 +426,31 @@ export function App() {
       setOfflineSyncedAt(cachedDefault.synced_at || cachedDefault.generated_at);
     }
 
-    if (typeof navigator !== 'undefined' && !navigator.onLine && cachedDefault) {
-      enterOfflineModeWithBundle(cachedDefault);
-      return;
+    // ALWAYS probe our own server first — even when PC Wi-Fi is off (`!navigator.onLine`),
+    // the local PC engine on 127.0.0.1 runs 100% offline with ALL full desktop features!
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const st = await api.authMe();
+        if (st.authenticated && st.token) {
+          setStoredToken(st.token);
+        }
+        setIsOfflineMode(false);
+        setAuth(st);
+        if (st.default_double_verify) {
+          setDoubleVerify(true);
+        }
+        return;
+      } catch {
+        if (attempt === 0) {
+          await new Promise((r) => window.setTimeout(r, 350));
+        }
+      }
     }
 
-    try {
-      const st = await api.authMe();
-      if (st.authenticated && st.token) {
-        setStoredToken(st.token);
-      }
-      setIsOfflineMode(false);
-      setAuth(st);
-      if (st.default_double_verify) {
-        setDoubleVerify(true);
-      }
-    } catch {
-      if (cachedDefault) {
-        enterOfflineModeWithBundle(cachedDefault);
-      } else {
-        setAuth({ authenticated: false });
-      }
+    if (cachedDefault) {
+      enterOfflineModeWithBundle(cachedDefault);
+    } else {
+      setAuth({ authenticated: false });
     }
   }, [enterOfflineModeWithBundle]);
 
@@ -450,10 +460,24 @@ export function App() {
 
   useEffect(() => {
     const onOffline = () => {
-      if (offlineBundle && !isOfflineMode) {
-        setIsOfflineMode(true);
-        setInstantMode(true);
-      }
+      if (!offlineBundle || isOfflineMode) return;
+      // On a local Windows PC with Wi-Fi off, 127.0.0.1 is STILL 100% alive!
+      // Only switch to stripped mobile offline mode if the backend server itself is unreachable.
+      const ctrl = new AbortController();
+      const t = window.setTimeout(() => ctrl.abort(), 1200);
+      void fetch('/api/health', { cache: 'no-store', signal: ctrl.signal })
+        .then((r) => {
+          window.clearTimeout(t);
+          if (!r.ok) {
+            setIsOfflineMode(true);
+            setInstantMode(true);
+          }
+        })
+        .catch(() => {
+          window.clearTimeout(t);
+          setIsOfflineMode(true);
+          setInstantMode(true);
+        });
     };
     const onOnline = () => {
       if (isOfflineMode) {

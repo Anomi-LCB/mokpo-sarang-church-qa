@@ -211,16 +211,24 @@ export async function triggerTicketDownload(path: string, fallbackName = 'docume
   }
 }
 
-async function reqJson<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(url, {
-    credentials: 'include',
-    ...init,
-    headers: authHeaders(
-      init.body instanceof FormData
-        ? (init.headers as Record<string, string>) || {}
-        : { 'Content-Type': 'application/json', ...((init.headers as Record<string, string>) || {}) }
-    ),
-  });
+async function reqJson<T>(url: string, init: RequestInit = {}, timeoutMs = 0): Promise<T> {
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      credentials: 'include',
+      ...init,
+      signal: controller ? controller.signal : init.signal,
+      headers: authHeaders(
+        init.body instanceof FormData
+          ? (init.headers as Record<string, string>) || {}
+          : { 'Content-Type': 'application/json', ...((init.headers as Record<string, string>) || {}) }
+      ),
+    });
+  } finally {
+    if (timer !== null) window.clearTimeout(timer);
+  }
   if (!res.ok) {
     let msg = `요청 오류 (${res.status})`;
     try {
@@ -235,7 +243,7 @@ async function reqJson<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  authMe: () => reqJson<AuthState>('/api/auth/me'),
+  authMe: () => reqJson<AuthState>('/api/auth/me', {}, 5000),
   issueTicket: () => reqJson<{ ticket: string; expires_in: number }>('/api/auth/ticket', { method: 'POST' }),
   login: async (pin: string, label: string) => {
     const res = await reqJson<{

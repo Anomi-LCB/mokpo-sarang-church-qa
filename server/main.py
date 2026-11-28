@@ -353,11 +353,10 @@ def create_app(
             "queue": q.status(),
         }
 
-    # ---- Native Desktop Window Activation (loopback only) ----
+    # ---- Native Desktop Window Activation & Worker Lifecycle (loopback only) ----
     @app.post("/api/internal/show-window")
     def internal_show_window(request: Request) -> dict[str, Any]:
-        client_host = (request.client.host if request.client else "") or ""
-        if client_host not in ("127.0.0.1", "::1", "localhost"):
+        if not _is_direct_loopback(request):
             raise HTTPException(status_code=403, detail="로컬 장치에서만 앱 창을 활성화할 수 있습니다.")
         if on_show_window is None:
             return {"ok": True, "shown": False}
@@ -366,6 +365,37 @@ def create_app(
         except Exception:
             shown = False
         return {"ok": True, "shown": shown}
+
+    @app.get("/api/internal/desktop-prefs")
+    def internal_desktop_prefs(request: Request) -> dict[str, Any]:
+        if not _is_direct_loopback(request):
+            raise HTTPException(status_code=403, detail="로컬 장치에서만 조회할 수 있습니다.")
+        db: Database = request.app.state.db
+        return {
+            "ok": True,
+            "pid": os.getpid(),
+            "keep_tray_on_close": db.get_setting("keep_tray_on_close", "0") == "1",
+            "local_auto_login": db.get_setting("local_auto_login", "1") == "1",
+        }
+
+    @app.post("/api/internal/shutdown")
+    def internal_shutdown(request: Request) -> dict[str, Any]:
+        if not _is_direct_loopback(request):
+            raise HTTPException(status_code=403, detail="로컬 장치에서만 서버를 종료할 수 있습니다.")
+        if on_shutdown is not None:
+            import threading
+
+            def _trigger() -> None:
+                import time
+
+                time.sleep(0.08)
+                try:
+                    on_shutdown()
+                except Exception:
+                    pass
+
+            threading.Thread(target=_trigger, daemon=True).start()
+        return {"ok": True, "shutting_down": on_shutdown is not None}
 
     def _is_direct_loopback(request: Request) -> bool:
         """Return True ONLY for direct local-PC requests (never via reverse proxy, tunnel, or LAN)."""
