@@ -3236,7 +3236,9 @@ export const AdminModal: React.FC<Props> = ({
               {cli?.is_default_pin && (
                 <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
                   <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                  <span>현재 기본 PIN(1234 / 0000)이 사용 중입니다. 외부 접속 전 반드시 고유 PIN 또는 비밀번호로 변경하세요.</span>
+                  <span>
+                    현재 외부 접속용 기본 PIN(1234 / 0000)이 설정되어 있습니다. 외부 스마트폰·다른 PC 접속을 사용하실 경우 고유 PIN으로 변경하세요. (내 PC 단독 사용 시에는 그대로 두셔도 안전합니다.)
+                  </span>
                 </div>
               )}
 

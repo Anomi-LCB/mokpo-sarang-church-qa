@@ -49,6 +49,7 @@ interface Props {
   onDoubleVerifyToggle: (v: boolean) => void;
   onSend: (query: string) => void;
   onUpgradeWithAi?: (msgId: string, query: string) => void;
+  onOpenAiSettings?: () => void;
   onOpenViewer: (docId: string, pageNo: number, highlightText?: string) => void;
   onOpenAutofill: (form: FormItem) => void;
 }
@@ -194,6 +195,7 @@ export const ChatPanel: React.FC<Props> = memo(({
   onDoubleVerifyToggle,
   onSend,
   onUpgradeWithAi,
+  onOpenAiSettings,
   onOpenViewer,
   onOpenAutofill,
 }) => {
@@ -460,30 +462,44 @@ export const ChatPanel: React.FC<Props> = memo(({
                         <div className="mt-4 flex flex-wrap items-center justify-between gap-2 pt-1">
                           <div className="flex flex-wrap items-center gap-1.5">
                             {!isOfflineMode &&
-                              onUpgradeWithAi &&
                               msg.hasEvidence !== false &&
-                              (msg.mode === 'instant' ||
-                                msg.provider === 'local-instant' ||
-                                msg.provider === 'local-pc-engine' ||
-                                msg.provider === 'local-offline-fallback') && (
+                              msg.provider === 'local-pc-engine' &&
+                              onOpenAiSettings ? (
                                 <button
                                   type="button"
                                   disabled={busy}
-                                  onClick={() => {
-                                    let prevQuery = '';
-                                    for (let i = msgIdx - 1; i >= 0; i--) {
-                                      if (messages[i].role === 'user') {
-                                        prevQuery = messages[i].content;
-                                        break;
-                                      }
-                                    }
-                                    if (prevQuery) onUpgradeWithAi(msg.id, prevQuery);
-                                  }}
+                                  onClick={onOpenAiSettings}
                                   className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#0f4c81] px-2.5 py-1 text-[11.5px] font-semibold text-white transition hover:bg-[#0c3d68] disabled:opacity-45"
                                 >
                                   <Sparkles className="h-3.5 w-3.5 shrink-0" />
-                                  <span>AI로 깔끔하게 정리</span>
+                                  <span>무료 AI 연결하기</span>
                                 </button>
+                              ) : (
+                                !isOfflineMode &&
+                                onUpgradeWithAi &&
+                                msg.hasEvidence !== false &&
+                                (msg.mode === 'instant' ||
+                                  msg.provider === 'local-instant' ||
+                                  msg.provider === 'local-offline-fallback') && (
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => {
+                                      let prevQuery = '';
+                                      for (let i = msgIdx - 1; i >= 0; i--) {
+                                        if (messages[i].role === 'user') {
+                                          prevQuery = messages[i].content;
+                                          break;
+                                        }
+                                      }
+                                      if (prevQuery) onUpgradeWithAi(msg.id, prevQuery);
+                                    }}
+                                    className="chip-nowrap inline-flex items-center gap-1 rounded-md bg-[#0f4c81] px-2.5 py-1 text-[11.5px] font-semibold text-white transition hover:bg-[#0c3d68] disabled:opacity-45"
+                                  >
+                                    <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                                    <span>AI로 깔끔하게 정리</span>
+                                  </button>
+                                )
                               )}
 
                             {msg.citations.length > 0 && (

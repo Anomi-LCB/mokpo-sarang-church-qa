@@ -13,10 +13,10 @@
 [Setup]
 AppId={{8D6E4921-7C31-4F92-9A0E-C81D2B4F9102}
 AppName=목포사랑의교회 행정Q&A
-AppVersion=4.4.0
-AppVerName=목포사랑의교회 행정Q&A 4.4.0
+AppVersion=4.4.1
+AppVerName=목포사랑의교회 행정Q&A 4.4.1
 AppPublisher=목포사랑의교회 행정·법규 검색 시스템
-DefaultDirName={autopf}\목포사랑의교회 행정Q&A
+DefaultDirName={localappdata}\Programs\목포사랑의교회 행정Q&A
 DefaultGroupName=목포사랑의교회 행정Q&A
 DisableProgramGroupPage=yes
 OutputDir={#ProjectRoot}\dist
@@ -27,7 +27,6 @@ Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
@@ -55,20 +54,13 @@ Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; Grou
 Name: "startup"; Description: "Windows 시작 시 백그라운드 자동 실행 (스마트폰 연결용 · 선택)"; GroupDescription: "추가 작업:"; Flags: unchecked
 
 [Dirs]
-Name: "{app}\data"; Permissions: users-modify; Check: IsAdminInstallMode
-Name: "{app}\data\downloads"; Permissions: users-modify; Check: IsAdminInstallMode
-Name: "{app}\data\notebooks"; Permissions: users-modify; Check: IsAdminInstallMode
-Name: "{app}\data\exports"; Permissions: users-modify; Check: IsAdminInstallMode
-Name: "{app}\data\backups"; Permissions: users-modify; Check: IsAdminInstallMode
-Name: "{app}\data\updates"; Permissions: users-modify; Check: IsAdminInstallMode
-Name: "{app}\data\models"; Permissions: users-modify; Check: IsAdminInstallMode
-Name: "{app}\data"; Check: not IsAdminInstallMode
-Name: "{app}\data\downloads"; Check: not IsAdminInstallMode
-Name: "{app}\data\notebooks"; Check: not IsAdminInstallMode
-Name: "{app}\data\exports"; Check: not IsAdminInstallMode
-Name: "{app}\data\backups"; Check: not IsAdminInstallMode
-Name: "{app}\data\updates"; Check: not IsAdminInstallMode
-Name: "{app}\data\models"; Check: not IsAdminInstallMode
+Name: "{app}\data"
+Name: "{app}\data\downloads"
+Name: "{app}\data\notebooks"
+Name: "{app}\data\exports"
+Name: "{app}\data\backups"
+Name: "{app}\data\updates"
+Name: "{app}\data\models"
 
 [Files]
 Source: "{#ProjectRoot}\dist\목포사랑의교회 행정Q&A\목포사랑의교회 행정Q&A.exe"; DestDir: "{app}"; Components: core; Flags: ignoreversion
@@ -94,9 +86,8 @@ Name: "{autodesktop}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포�
 Name: "{userstartup}\목포사랑의교회 행정Q&A"; Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Parameters: "--headless"; AppUserModelID: "MokpoSarangChurch.AdminQA"; Tasks: startup
 
 [Run]
-Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup-amd64.msi"" /qn /norestart"; StatusMsg: "Tailscale 원격 연결 도구를 오프라인으로 설치하고 있습니다..."; Components: tailscale; Check: NeedsTailscaleInstall and IsAdminInstallMode; Flags: waituntilterminated
-Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup-amd64.msi"" /qb /norestart"; StatusMsg: "Tailscale 원격 연결 도구를 설치하고 있습니다..."; Components: tailscale; Check: NeedsTailscaleInstall and (not IsAdminInstallMode); Flags: waituntilterminated
-Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Description: "목포사랑의교회 행정Q&A 지금 실행"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\tailscale-setup-amd64.msi"" /qb /norestart"; StatusMsg: "Tailscale 원격 연결 도구를 설치하고 있습니다..."; Components: tailscale; Check: NeedsTailscaleInstall; Flags: waituntilterminated
+Filename: "{app}\목포사랑의교회 행정Q&A.exe"; Description: "목포사랑의교회 행정Q&A 지금 실행"; Flags: nowait postinstall skipifsilent
 
 [Code]
 var
@@ -114,6 +105,27 @@ function NeedsTailscaleInstall: Boolean;
 begin
   Result := not FileExists(ExpandConstant('{pf64}\Tailscale\tailscale.exe'))
             and not FileExists(ExpandConstant('{pf32}\Tailscale\tailscale.exe'));
+end;
+
+procedure KillRunningApp;
+var
+  ResultCode: Integer;
+begin
+  // Terminate any hidden tray/background instance BEFORE writing binaries or DB files
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM "목포사랑의교회 행정Q&A.exe"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(800);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  KillRunningApp;
+  Result := '';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  KillRunningApp;
+  Result := True;
 end;
 
 function JsonEscape(const S: String): String;

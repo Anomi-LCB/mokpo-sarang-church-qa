@@ -260,7 +260,85 @@ class Database:
         self._local = threading.local()
         self._pool_lock = threading.Lock()
         self._all_conns: set[sqlite3.Connection] = set()
+        self._ensure_healthy_db_file()
         self._init_schema()
+
+    @staticmethod
+    def _is_sqlite_file_healthy(path: Path) -> bool:
+        """Verify that a SQLite file opens cleanly and passes PRAGMA quick_check."""
+        if not path.exists() or path.stat().st_size == 0:
+            return True
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(path), timeout=5.0)
+            rows = conn.execute("PRAGMA quick_check;").fetchall()
+            return bool(rows and len(rows) == 1 and str(rows[0][0]).lower() == "ok")
+        except sqlite3.Error:
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _ensure_healthy_db_file(self) -> None:
+        """Auto-heal corrupted SQLite files or stale WAL/SHM sidecars so the app NEVER fails to start."""
+        if not self.db_path.exists() or self.db_path.stat().st_size == 0:
+            return
+        if self._is_sqlite_file_healthy(self.db_path):
+            return
+
+        import shutil
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        wal_path = Path(str(self.db_path) + "-wal")
+        shm_path = Path(str(self.db_path) + "-shm")
+
+        # Step 1: Sometimes an abrupt process kill leaves only an orphaned/mismatched -wal/-shm sidecar.
+        if wal_path.exists() or shm_path.exists():
+            for sidecar in (wal_path, shm_path):
+                if sidecar.exists():
+                    try:
+                        sidecar.replace(Path(f"{sidecar}.stale_{ts}"))
+                    except OSError:
+                        sidecar.unlink(missing_ok=True)
+            if self._is_sqlite_file_healthy(self.db_path):
+                print(f"[AUTO-HEAL] Cleared stale WAL/SHM sidecar; DB {self.db_path.name} is healthy.", flush=True)
+                return
+
+        # Step 2: Quarantine the corrupted DB file so forensic recovery remains possible.
+        corrupt_bak = self.db_path.parent / f"{self.db_path.name}.corrupt_{ts}"
+        try:
+            self.db_path.replace(corrupt_bak)
+        except OSError:
+            shutil.copy2(self.db_path, corrupt_bak)
+            self.db_path.unlink(missing_ok=True)
+        for sidecar in (wal_path, shm_path):
+            sidecar.unlink(missing_ok=True)
+
+        # Step 3: Automatically restore the newest verified healthy backup from data/backups/*.db
+        backups_dir = self.db_path.parent / "backups"
+        if backups_dir.exists():
+            candidates = sorted(
+                (p for p in backups_dir.glob("*.db") if p.is_file() and p.stat().st_size > 0),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for cand in candidates:
+                if self._is_sqlite_file_healthy(cand):
+                    shutil.copy2(cand, self.db_path)
+                    print(
+                        f"[AUTO-HEAL] Corrupted DB quarantined to {corrupt_bak.name}; "
+                        f"automatically restored healthy backup {cand.name}.",
+                        flush=True,
+                    )
+                    return
+
+        print(
+            f"[AUTO-HEAL] Corrupted DB quarantined to {corrupt_bak.name}; initializing fresh database.",
+            flush=True,
+        )
 
     def _open_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
@@ -275,11 +353,18 @@ class Database:
         return conn
 
     def close_pooled_connections(self) -> None:
-        """Close all thread-local pooled SQLite handles cleanly (before backup restore or shutdown)."""
+        """Checkpoint WAL and close all thread-local pooled SQLite handles cleanly on shutdown/restore."""
         with self._pool_lock:
             conns = list(self._all_conns)
             self._all_conns.clear()
+        checkpointed = False
         for c in conns:
+            if not checkpointed:
+                try:
+                    c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    checkpointed = True
+                except Exception:
+                    pass
             try:
                 c.close()
             except Exception:

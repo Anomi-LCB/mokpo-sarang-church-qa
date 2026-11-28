@@ -321,6 +321,23 @@ def _show_webview_missing_dialog(url: str) -> None:
             pass
 
 
+def _show_startup_failed_dialog(detail: str) -> None:
+    """Never open an Edge ERR_CONNECTION_REFUSED window when the local backend failed to boot."""
+    log_path = get_data_dir() / "server.log"
+    msg = (
+        "로컬 검색 엔진 시작 중 오류가 발생했습니다.\n\n"
+        f"원인: {detail or '내부 서버가 응답하지 않았습니다.'}\n"
+        f"로그 위치: {log_path}\n\n"
+        "프로그램을 다시 실행해 보시고, 문제가 반복되면 최신 설치 파일로 재설치해 주세요."
+    )
+    print(f"[FATAL] {msg}", flush=True)
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.user32.MessageBoxW(0, msg, f"{APP_NAME} — 시작 오류", 0x10)
+        except Exception:
+            pass
+
+
 def _toggle_startup_shortcut() -> str:
     startup_dir = Path(os.environ.get("APPDATA", "")) / r"Microsoft\Windows\Start Menu\Programs\Startup"
     lnk_path = startup_dir / "목포사랑의교회 행정Q&A.vbs"
@@ -420,15 +437,24 @@ def main() -> None:
         except Exception:
             return False
 
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning", log_config=None)
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="warning",
+        log_config=None,
+        timeout_graceful_shutdown=2,
+    )
     server = uvicorn.Server(config)
     server_ref["server"] = server
+    server_error_ref: dict[str, str] = {"error": ""}
 
     def _run_server() -> None:
         try:
             server.run()
         except Exception as exc:
             import traceback
+            server_error_ref["error"] = str(exc)
             print(f"[FATAL] Server crashed: {exc}", flush=True)
             traceback.print_exc()
 
@@ -436,11 +462,23 @@ def main() -> None:
     server_thread.start()
 
     url = f"http://127.0.0.1:{port}"
-    # Wait up to 10s for *our* server readiness before creating the native window
-    for _ in range(50):
+    # Wait up to 20s for *our* server readiness; abort immediately if server_thread exits!
+    server_ready = False
+    for _ in range(100):
         if _is_our_server_healthy(port):
+            server_ready = True
+            break
+        if not server_thread.is_alive():
             break
         time.sleep(0.2)
+
+    if not server_ready:
+        detail = server_error_ref.get("error") or "내부 엔진 초기화가 중단되었습니다 (server.log 확인)."
+        if not headless:
+            _show_startup_failed_dialog(detail)
+        server.should_exit = True
+        server_thread.join(timeout=2.0)
+        return
 
     def on_open(icon, item):
         if not _show_native_window():
@@ -477,6 +515,8 @@ def main() -> None:
 
     if headless:
         tray.run()
+        server.should_exit = True
+        server_thread.join(timeout=3.0)
         return
 
     # Personal standalone desktop mode by default: closing the native window cleanly exits the app.
@@ -501,6 +541,8 @@ def main() -> None:
             tray.stop()
         except Exception:
             pass
+        # Wait briefly so lifespan runs SQLite WAL checkpoint & closes sockets cleanly!
+        server_thread.join(timeout=3.0)
 
 
 if __name__ == "__main__":

@@ -142,7 +142,11 @@ def test_windows_installer_is_uac_free_personal_app_and_launcher_exits_cleanly()
     iss = (root / "packaging" / "windows" / "installer.iss").read_text(encoding="utf-8-sig")
     assert f"AppVersion={APP_VERSION}" in iss
     assert "PrivilegesRequired=lowest" in iss
-    assert "PrivilegesRequiredOverridesAllowed=dialog" in iss
+    assert "PrivilegesRequiredOverridesAllowed" not in iss
+    assert "DefaultDirName={localappdata}\\Programs\\목포사랑의교회 행정Q&A" in iss
+    assert "KillRunningApp" in iss
+    assert "PrepareToInstall" in iss
+    assert "InitializeUninstall" in iss
     assert "{userstartup}" in iss
     assert "{commonstartup}" not in iss
     # Tailscale must be custom-only so standard personal Windows install never touches system VPN/UAC
@@ -154,3 +158,50 @@ def test_windows_installer_is_uac_free_personal_app_and_launcher_exits_cleanly()
     launcher = (root / "packaging" / "windows" / "launcher.py").read_text(encoding="utf-8")
     assert 'get_setting("keep_tray_on_close", "0") == "1"' in launcher
     assert "should_hide_on_close=_get_keep_tray_on_close" in launcher
+    assert "_show_startup_failed_dialog" in launcher
+    assert "not server_thread.is_alive()" in launcher
+    assert "timeout_graceful_shutdown=2" in launcher
+    assert "server_thread.join(timeout=3.0)" in launcher
+
+
+def test_database_auto_heals_corrupted_db_from_backup_and_fresh_fallback(tmp_path: Path) -> None:
+    import shutil
+    import sqlite3
+    from core.database import Database
+
+    # 1. Create a healthy DB, save a backup, then corrupt the live DB
+    data_dir = tmp_path / "data"
+    db_path = data_dir / "church_search.db"
+    backups_dir = data_dir / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+
+    db1 = Database(db_path=db_path)
+    db1.ensure_default_notebook()
+    db1.set_setting("sentinel_key", "preserved_value_123")
+    db1.close_pooled_connections()
+
+    backup_copy = backups_dir / "backup_20261128_090000_daily.db"
+    shutil.copy2(db_path, backup_copy)
+
+    # Corrupt live DB with garbage bytes + bogus -wal
+    db_path.write_bytes(b"NOT A VALID SQLITE DATABASE FILE" * 200)
+    Path(str(db_path) + "-wal").write_bytes(b"CORRUPT WAL")
+
+    # Re-opening MUST auto-heal from the healthy backup without crashing!
+    db2 = Database(db_path=db_path)
+    assert db2.get_setting("sentinel_key") == "preserved_value_123"
+    assert list(data_dir.glob("church_search.db.corrupt_*")), "Corrupt DB should be quarantined"
+    db2.close_pooled_connections()
+
+    # 2. Corrupt live DB with NO backups available -> MUST initialize a clean DB without crashing!
+    shutil.rmtree(backups_dir)
+    db_path.write_bytes(b"BROKEN_NO_BACKUP_BYTES" * 100)
+    db3 = Database(db_path=db_path)
+    nb = db3.ensure_default_notebook()
+    assert nb["id"] == DEFAULT_NOTEBOOK_ID
+    db3.close_pooled_connections()
+
+    # Verify PRAGMA quick_check passes cleanly after WAL checkpoint on close
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("PRAGMA quick_check;").fetchall() == [("ok",)]
+    conn.close()

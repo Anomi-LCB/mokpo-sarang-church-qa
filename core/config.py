@@ -7,7 +7,7 @@ from pathlib import Path
 os.environ.setdefault("PYTHONUTF8", "1")
 
 APP_NAME = "목포사랑의교회 행정Q&A"
-APP_VERSION = "4.4.0"
+APP_VERSION = "4.4.1"
 DEFAULT_UPDATE_REPO = "Anomi-LCB/mokpo-sarang-church-qa"
 DEFAULT_UPDATE_MANIFEST_URL = (
     f"https://github.com/{DEFAULT_UPDATE_REPO}/releases/latest/download/update-manifest.json"
@@ -87,14 +87,51 @@ def get_resource_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _is_dir_writable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".write_probe_{os.getpid()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def get_data_dir() -> Path:
     override = os.environ.get("CHURCH_SEARCH_DATA_DIR")
     if override:
         p = Path(override).resolve()
-    else:
-        p = get_base_dir() / "data"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    primary = get_base_dir() / "data"
+    if _is_dir_writable(primary):
+        return primary
+
+    # Safe fallback if installed inside a read-only folder (e.g., C:\Program Files under non-admin user)
+    local_app = os.environ.get("LOCALAPPDATA")
+    fallback = (
+        Path(local_app) / "MokpoSarangChurchQA" / "data"
+        if local_app
+        else Path.home() / ".mokpo_sarang_church_qa" / "data"
+    )
+    fallback.mkdir(parents=True, exist_ok=True)
+    # Seed initial DB/docs once from read-only install dir if present
+    src_db = primary / "church_search.db"
+    dst_db = fallback / "church_search.db"
+    if src_db.exists() and not dst_db.exists():
+        import shutil
+
+        try:
+            shutil.copy2(src_db, dst_db)
+            src_nb = primary / "notebooks"
+            dst_nb = fallback / "notebooks"
+            if src_nb.exists() and not dst_nb.exists():
+                shutil.copytree(src_nb, dst_nb, dirs_exist_ok=True)
+        except OSError:
+            pass
+    return fallback
 
 
 def get_db_path() -> Path:

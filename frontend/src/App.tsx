@@ -1327,7 +1327,7 @@ export function App() {
             </ToolbarTip>
           )}
 
-          <ToolbarTip label="로그아웃" align="right">
+          <ToolbarTip label={auth.local_auto_login ? '화면 잠금 (PIN)' : '로그아웃'} align="right">
             <button
               type="button"
               onClick={() => {
@@ -1477,6 +1477,7 @@ export function App() {
             onDoubleVerifyToggle={setDoubleVerify}
             onSend={(q) => void handleSend(q)}
             onUpgradeWithAi={(msgId, q) => void handleUpgradeMessageWithAi(msgId, q)}
+            onOpenAiSettings={() => setAdminModalTab('cli')}
             onOpenViewer={(docId, pageNo, highlightText) =>
               setViewerTarget({ docId, pageNo, highlightText })
             }
